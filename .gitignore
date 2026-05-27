@@ -1,0 +1,72 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+.eggs/
+build/
+dist/
+pip-wheel-metadata/
+
+# --- CUDA / C extensions ---
+*.so
+*.o
+*.a
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- Conda / venv ---
+.conda/
+env/
+venv/
+.venv/
+
+# --- Training outputs / checkpoints / logs ---
+output/
+output_*/
+outputs/
+results/
+runs/
+logs/
+log/
+wandb/
+lightning_logs/
+slurm-*
+*.log
+*.out
+*.pid
+*.txt
+
+# --- Model checkpoints / large binaries ---
+*.pth
+*.pt
+*.ckpt
+*.npy
+*.tar
+*.tar.gz
+*.zip
+*.whl
+
+# --- Datasets (kept outside the repo) ---
+data/
+datasets/
+datasets_*/
+
+# --- Local scratch / exploration ---
+scratch/
+notes/
+exp/
+tmp/
+*.ipynb
+*.ipynb_checkpoints
+
+# --- Keep these (negate ignore for repo-shipped assets) ---
+!assets/*.jpg
+!assets/*.png

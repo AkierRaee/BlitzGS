@@ -1,0 +1,33 @@
+name: blitzgs2
+channels:
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - nvidia::cuda-nvcc=12.6.85
+  - nvidia::cuda-cudart-dev=12.6.77
+  - nvidia::cuda-libraries-dev=12.6.3
+  - gcc_linux-64=12.4
+  - gxx_linux-64=12.4
+  - pip:
+      - --extra-index-url https://download.pytorch.org/whl/cu126
+      - torch==2.11.0+cu126
+      - torchvision==0.26.0+cu126
+      - torchaudio==2.11.0+cu126
+      - plyfile
+      - opencv-python
+      - pillow
+      - kornia
+      - pytorch-msssim
+      - numpy
+      - scipy
+      - scikit-learn
+      - matplotlib
+      - tqdm
+      - joblib
+      - jaxtyping
+      - psutil
+      - debugpy
+      - setuptools
