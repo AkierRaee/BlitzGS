@@ -84,11 +84,17 @@ Use [`run_train_final.sh`](run_train_final.sh). Edit the dataset and output path
 ## 🎨 Rendering and Evaluation
 
 ```bash
-# Render a trained model
-python render_c.py -m <model_path>
+# Render a trained model (multi-GPU)
+torchrun --nproc_per_node <num_gpus> render_c.py \
+    -m <model_path> \
+    -s <dataset_split_path> \
+    --images images \
+    --resolution 4 \
+    --iteration <max_iters> \
+    --skip_train --eval
 
 # Compute PSNR / SSIM / LPIPS
-python metrics.py -m <model_path>
+python metrics.py -m <model_path> --mode <split_name> --num_gpus <num_gpus>
 ```
 
 ## 🙏 Acknowledgements
