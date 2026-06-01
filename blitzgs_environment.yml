@@ -1,4 +1,4 @@
-name: blitzgs2
+name: blitzgs
 channels:
   - nvidia
   - conda-forge
