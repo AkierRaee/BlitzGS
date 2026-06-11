@@ -97,14 +97,10 @@ torchrun --nproc_per_node <num_gpus> render_c.py \
 python metrics.py -m <model_path> --mode <split_name> --num_gpus <num_gpus>
 ```
 
-## 🙏 Acknowledgements
+## 📞 Contract
+If you have any problems, feel free to contact us:
+wangzhongtao[at]stu.pku.edu.cn or huishan_au[at]stu.pku.edu.cn
 
-We thank the authors of the following open-source projects for their excellent work, which this codebase builds upon:
-
-- [3D Gaussian Splatting](https://github.com/graphdeco-inria/gaussian-splatting) 
-- [CityGS-X](https://github.com/gyy456/CityGS-X)
-- [Octree-AnyGS](https://github.com/city-super/Octree-AnyGS)
-- [mini-splatting2](https://github.com/fatPeter/mini-splatting2)
 
 ## 📜 License
 
