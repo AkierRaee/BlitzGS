@@ -97,8 +97,10 @@ torchrun --nproc_per_node <num_gpus> render_c.py \
 python metrics.py -m <model_path> --mode <split_name> --num_gpus <num_gpus>
 ```
 
-## 📞 Contract
+## 📞 Contact
+
 If you have any problems, feel free to contact us:
+
 wangzhongtao[at]stu.pku.edu.cn or huishan_au[at]stu.pku.edu.cn
 
 
