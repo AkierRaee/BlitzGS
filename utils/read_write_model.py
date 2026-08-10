@@ -263,7 +263,7 @@ def read_images_binary(path_to_model_file):
             camera_id = binary_image_properties[8]
             image_name = ""
             current_char = read_next_bytes(fid, 1, "c")[0]
-            while current_char != b"\x00":  # look for the ASCII 0 entry
+            while current_char != b"\x00":
                 image_name += current_char.decode("utf-8")
                 current_char = read_next_bytes(fid, 1, "c")[0]
             num_points2D = read_next_bytes(
@@ -487,7 +487,6 @@ def detect_model_format(path, ext):
 
 
 def read_model(path, ext=""):
-    # try to detect the extension automatically
     if ext == "":
         if detect_model_format(path, ".bin"):
             ext = ".bin"
@@ -562,43 +561,3 @@ def rotmat2qvec(R):
     return qvec
 
 
-# def main():
-#     parser = argparse.ArgumentParser(
-#         description="Read and write COLMAP binary and text models"
-#     )
-#     parser.add_argument("--input_model", help="path to input model folder")
-#     parser.add_argument(
-#         "--input_format",
-#         choices=[".bin", ".txt"],
-#         help="input model format",
-#         default="",
-#     )
-#     parser.add_argument("--output_model", help="path to output model folder")
-#     parser.add_argument(
-#         "--output_format",
-#         choices=[".bin", ".txt"],
-#         help="outut model format",
-#         default=".txt",
-#     )
-#     args = parser.parse_args()
-
-#     cameras, images, points3D = read_model(
-#         path=args.input_model, ext=args.input_format
-#     )
-
-#     print("num_cameras:", len(cameras))
-#     print("num_images:", len(images))
-#     print("num_points3D:", len(points3D))
-
-#     if args.output_model is not None:
-#         write_model(
-#             cameras,
-#             images,
-#             points3D,
-#             path=args.output_model,
-#             ext=args.output_format,
-#         )
-
-
-# if __name__ == "__main__":
-#     main()

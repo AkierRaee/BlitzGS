@@ -76,6 +76,12 @@ class GaussianModel:
 
         self._lod_level = torch.empty(0, dtype=torch.int8)
         self.octree = None
+
+        self._ids = None
+        self._birth_iter = None
+        self._id_prefix = 0
+        self._next_local_id = 0
+        self.spawn_gate = None
         self._lod_last_kept = None
         self._lod_last_total = None
         self._lod_last_active_level = None
@@ -128,6 +134,116 @@ class GaussianModel:
             self.octree = OctreeLOD.from_state_dict(optional[1])
         elif len(optional) >= 1 and optional[0] is not None:
             self._lod_level = optional[0]
+
+    def save_id_state(self, folder):
+        """E40: persist the id-tracking state next to a training checkpoint
+        (capture() predates ids and its tuple format is left untouched)."""
+        if self._ids is None:
+            return
+        torch.save({
+            "ids": self._ids.cpu(),
+            "birth_iter": self._birth_iter.cpu(),
+            "next_local_id": self._next_local_id,
+            "id_prefix": self._id_prefix,
+        }, os.path.join(folder, "id_state_ws={}_rk={}.pt".format(
+            utils.WORLD_SIZE, utils.GLOBAL_RANK)))
+
+    def load_id_state(self, checkpoint_folder):
+        """E40: restore id state saved by save_id_state for the checkpoint at
+        <model>/checkpoints/<it>/ (sidecar lives in checkpoints_idstate/<it>/).
+        Returns True when restored — the signal that the spawn gate may be
+        enabled on a resumed run."""
+        ckpt = checkpoint_folder.rstrip("/")
+        folder = os.path.join(os.path.dirname(os.path.dirname(ckpt)),
+                              "checkpoints_idstate", os.path.basename(ckpt))
+        path = os.path.join(folder, "id_state_ws={}_rk={}.pt".format(
+            utils.WORLD_SIZE, utils.GLOBAL_RANK))
+        if not os.path.exists(path):
+            return False
+        blob = torch.load(path, map_location="cpu")
+        self._ids = blob["ids"].cuda()
+        self._birth_iter = blob["birth_iter"].cuda()
+        self._next_local_id = int(blob["next_local_id"])
+        self._id_prefix = int(blob["id_prefix"])
+        assert self._ids.shape[0] == self._xyz.shape[0], \
+            "id_state size {} != model size {}".format(
+                self._ids.shape[0], self._xyz.shape[0])
+        return True
+
+    def _init_id_tracking(self):
+        """Persistent globally-unique IDs + birth iterations for the current
+        population. Substrate of the spawn gate's parent_age feature."""
+        rank = utils.GLOBAL_RANK
+        n = self._xyz.shape[0]
+        self._id_prefix = rank << 40
+        self._ids = torch.arange(n, dtype=torch.int64, device="cuda") + self._id_prefix
+        self._next_local_id = n
+        self._birth_iter = torch.zeros(n, dtype=torch.int32, device="cuda")
+
+    def init_spawn_gate(self, gate):
+        """Enable the spawn pruning gate. Needs ID tracking for parent_age."""
+        if self._ids is None:
+            self._init_id_tracking()
+        self.spawn_gate = gate
+
+    def _apply_spawn_gate(self, selected_pts_mask, grad_norm, is_split):
+        """Veto spawn candidates the gate predicts will not survive.
+        Returns selected_pts_mask with vetoed candidates cleared."""
+        if self.spawn_gate is None:
+            return selected_pts_mask
+        n_sel = int(selected_pts_mask.sum())
+        if n_sel == 0:
+            return selected_pts_mask
+        it = utils.get_cur_iter() or 0
+        if self.octree is not None:
+            lv = self._lod_level[selected_pts_mask]
+            if is_split:
+                lv = (lv.long() + 1).clamp(0, self.octree.levels - 1)
+        else:
+            lv = None
+        feats = self._spawn_features(grad_norm, selected_pts_mask, lv)
+        veto = self.spawn_gate.veto(feats, it, is_split)
+        if veto is None:
+            return selected_pts_mask
+        out = selected_pts_mask.clone()
+        sel_idx = selected_pts_mask.nonzero(as_tuple=True)[0]
+        out[sel_idx[veto]] = False
+        print(f"[SpawnGate iter={it} rk{utils.GLOBAL_RANK}] "
+              f"{'split' if is_split else 'clone'}: cand={n_sel} "
+              f"vetoed={int(veto.sum())}", flush=True)
+        return out
+
+    def _extend_ids(self, n_new):
+        if self._ids is None or n_new <= 0:
+            return
+        it = utils.get_cur_iter() or 0
+        new_ids = torch.arange(n_new, dtype=torch.int64, device="cuda") \
+            + (self._id_prefix + self._next_local_id)
+        self._next_local_id += n_new
+        self._ids = torch.cat([self._ids, new_ids])
+        self._birth_iter = torch.cat([
+            self._birth_iter,
+            torch.full((n_new,), it, dtype=torch.int32, device="cuda")])
+
+    def _spawn_features(self, grad_norm, selected_pts_mask, parent_levels):
+        """Spawn-time feature dict for the selected parents (read BEFORE
+        densification_postfix reallocates denom)."""
+        if self._ids is None:
+            return None
+        it = utils.get_cur_iter() or 0
+        n = int(selected_pts_mask.sum())
+        if parent_levels is not None:
+            lod = parent_levels.float()
+        else:
+            lod = torch.full((n,), -1.0, device="cuda")
+        return {
+            "parent_grad": grad_norm[selected_pts_mask],
+            "parent_opacity": self.get_opacity[selected_pts_mask].squeeze(-1),
+            "parent_scale": self.get_scaling[selected_pts_mask].mean(dim=1),
+            "parent_age": (it - self._birth_iter[selected_pts_mask]).float(),
+            "parent_denom": self.denom[selected_pts_mask].squeeze(-1),
+            "lod_level": lod,
+        }
 
     @property
     def get_scaling(self):
@@ -476,6 +592,9 @@ class GaussianModel:
 
     def prune_points(self, mask):
         valid_points_mask = ~mask
+        if self._ids is not None and self._ids.shape[0] == valid_points_mask.shape[0]:
+            self._ids = self._ids[valid_points_mask]
+            self._birth_iter = self._birth_iter[valid_points_mask]
         optimizable_tensors = self._prune_optimizer(valid_points_mask)
         self._xyz = optimizable_tensors["xyz"]
         self._features_dc = optimizable_tensors["f_dc"]
@@ -488,8 +607,12 @@ class GaussianModel:
         self.max_radii2D = self.max_radii2D[valid_points_mask]
 
         if hasattr(self, '_culling') and self._culling is not None:
-            self._culling = self._culling[valid_points_mask]
-            self.factor_culling = self.factor_culling[valid_points_mask]
+            if self._culling.shape[0] == valid_points_mask.shape[0]:
+                self._culling = self._culling[valid_points_mask]
+                self.factor_culling = self.factor_culling[valid_points_mask]
+            else:
+                self._culling = None
+                self.factor_culling = None
 
         if self.octree is not None and self._lod_level.shape[0] == valid_points_mask.shape[0]:
             self._lod_level = self._lod_level[valid_points_mask]
@@ -513,6 +636,7 @@ class GaussianModel:
         return optimizable_tensors
 
     def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, parent_levels=None):
+        self._extend_ids(new_xyz.shape[0])
         d = {"xyz": new_xyz, "f_dc": new_features_dc, "f_rest": new_features_rest, "opacity": new_opacities, "scaling" : new_scaling, "rotation" : new_rotation}
         optimizable_tensors = self.cat_tensors_to_optimizer(d)
         self._xyz = optimizable_tensors["xyz"]
@@ -551,11 +675,29 @@ class GaussianModel:
                 self._opacity = group["params"][0]
                 break
 
+    @torch.no_grad()
+    def reset_scaling(self, factor: float):
+        if factor <= 0.0 or factor == 1.0:
+            return
+        log_factor = float(np.log(factor))
+        for group in self.optimizer.param_groups:
+            if group["name"] == "scaling":
+                param = group["params"][0]
+                param.data.add_(log_factor)
+                stored_state = self.optimizer.state.get(param, None)
+                if stored_state is not None:
+                    if "exp_avg" in stored_state:
+                        stored_state["exp_avg"].zero_()
+                    if "exp_avg_sq" in stored_state:
+                        stored_state["exp_avg_sq"].zero_()
+                break
+
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
         self.densify_and_clone(grads, max_grad, extent)
         self.densify_and_split(grads, max_grad, extent)
+        count_after_grow = self.get_xyz.shape[0]
         prune_mask = (self.get_opacity < min_opacity).squeeze()
         if max_screen_size:
             big_points_vs = self.max_radii2D > max_screen_size
@@ -563,6 +705,89 @@ class GaussianModel:
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
         self.prune_points(prune_mask)
         torch.cuda.empty_cache()
+        return count_after_grow
+
+    def densify_and_prune_topk(self, K_global, min_opacity, extent, max_screen_size, score_mode="grad"):
+        grads = self.xyz_gradient_accum / self.denom
+        grads[grads.isnan()] = 0.0
+        grad_norm = torch.norm(grads, dim=-1)
+        is_split = torch.max(self.get_scaling, dim=1).values > self.percent_dense * extent
+        score = self._compute_topk_score(grads, score_mode)
+
+        if K_global > 0:
+            selected = self._global_topk_mask(score, K_global)
+        else:
+            selected = torch.zeros_like(score, dtype=torch.bool)
+
+        clone_mask = selected & ~is_split
+        split_mask = selected & is_split
+        split_grad = grad_norm
+        self._densify_and_clone_masked(clone_mask, grad_norm)
+        n_after_clone = self._xyz.shape[0]
+        if n_after_clone > split_mask.shape[0]:
+            n_pad = n_after_clone - split_mask.shape[0]
+            split_mask = torch.cat([split_mask, torch.zeros(n_pad, dtype=torch.bool, device=split_mask.device)])
+            split_grad = torch.cat([split_grad, torch.zeros(n_pad, device=split_grad.device)])
+        self._densify_and_split_masked(split_mask, split_grad)
+        count_after_grow = self.get_xyz.shape[0]
+
+        prune_mask = (self.get_opacity < min_opacity).squeeze()
+        if max_screen_size:
+            big_points_vs = self.max_radii2D > max_screen_size
+            big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
+            prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
+        self.prune_points(prune_mask)
+        torch.cuda.empty_cache()
+        return count_after_grow
+
+    def _compute_topk_score(self, grads, mode):
+        g = torch.norm(grads, dim=-1)
+        if mode == "grad":
+            return g
+        if mode == "grad_times_denom":
+            return g * self.denom.squeeze(-1).clamp(min=1.0)
+        if mode == "grad_times_opacity":
+            return g * self.get_opacity.squeeze(-1)
+        raise ValueError(f"unknown topk_score mode: {mode}")
+
+    def _global_topk_mask(self, score, K_global):
+        if utils.WORLD_SIZE <= 1:
+            K = int(min(K_global, score.numel()))
+            if K == 0:
+                return torch.zeros_like(score, dtype=torch.bool)
+            threshold = score.topk(K).values[-1]
+            return score >= threshold
+
+        finite = torch.isfinite(score)
+        if finite.any():
+            local_min = score[finite].min()
+            local_max = score[finite].max()
+        else:
+            local_min = torch.tensor(0.0, device=score.device)
+            local_max = torch.tensor(0.0, device=score.device)
+        lo_t = local_min.detach().clone()
+        hi_t = local_max.detach().clone()
+        dist.all_reduce(lo_t, op=dist.ReduceOp.MIN)
+        dist.all_reduce(hi_t, op=dist.ReduceOp.MAX)
+        lo, hi = float(lo_t.item()), float(hi_t.item())
+        if not (hi > lo):
+            return torch.zeros_like(score, dtype=torch.bool)
+
+        tol = max(1, K_global // 100)
+        threshold = 0.5 * (lo + hi)
+        for _ in range(24):
+            threshold = 0.5 * (lo + hi)
+            local_count = int((score >= threshold).sum().item())
+            ct = torch.tensor([local_count], device=score.device, dtype=torch.long)
+            dist.all_reduce(ct, op=dist.ReduceOp.SUM)
+            global_count = int(ct.item())
+            if abs(global_count - K_global) <= tol:
+                break
+            if global_count > K_global:
+                lo = threshold
+            else:
+                hi = threshold
+        return score >= threshold
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
@@ -571,6 +796,10 @@ class GaussianModel:
     def densify_and_clone(self, grads, grad_threshold, scene_extent):
         selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
         selected_pts_mask = torch.logical_and(selected_pts_mask, torch.max(self.get_scaling, dim=1).values <= self.percent_dense*scene_extent)
+        selected_pts_mask = self._apply_spawn_gate(selected_pts_mask, torch.norm(grads, dim=-1), is_split=False)
+        self._densify_and_clone_masked(selected_pts_mask, torch.norm(grads, dim=-1))
+
+    def _densify_and_clone_masked(self, selected_pts_mask, grad_norm):
         new_xyz = self._xyz[selected_pts_mask]
         new_features_dc = self._features_dc[selected_pts_mask]
         new_features_rest = self._features_rest[selected_pts_mask]
@@ -592,7 +821,10 @@ class GaussianModel:
         padded_grad[:grads.shape[0]] = grads.squeeze()
         selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
         selected_pts_mask = torch.logical_and(selected_pts_mask, torch.max(self.get_scaling, dim=1).values > self.percent_dense*scene_extent)
+        selected_pts_mask = self._apply_spawn_gate(selected_pts_mask, padded_grad, is_split=True)
+        self._densify_and_split_masked(selected_pts_mask, padded_grad, N=N)
 
+    def _densify_and_split_masked(self, selected_pts_mask, padded_grad, N=2):
         stds = self.get_scaling[selected_pts_mask].repeat(N,1)
         means =torch.zeros((stds.size(0), 3),device="cuda")
         samples = torch.normal(mean=means, std=stds)
@@ -674,7 +906,10 @@ class GaussianModel:
             count_vis[non_prune_mask] += 1
 
         imp_score[accum_area_max == 0] = 0
-        non_prune_mask = init_cdf_mask(importance=imp_score, thres=0.99)
+        if getattr(args, 'view_normalized_importance', False):
+            imp_score = imp_score / (count_rad[:, 0] + 1e-6)
+        non_prune_mask = init_cdf_mask(importance=imp_score,
+                                       thres=getattr(args, 'simp2_cdf_thres', 0.99))
         self.factor_culling = count_vis / (count_rad + 1e-1)
 
         prune_mask = non_prune_mask == False
@@ -712,6 +947,8 @@ class GaussianModel:
             count_vis[non_prune_mask] += 1
 
         imp_score[accum_area_max == 0] = 0
+        if getattr(args, 'view_normalized_importance', False):
+            imp_score = imp_score / (count_rad[:, 0] + 1e-6)
         prob = imp_score / imp_score.sum()
         prob = prob.cpu().numpy()
 
@@ -885,6 +1122,12 @@ class GaussianModel:
         if self.octree is not None and self._lod_level.numel() > 0:
             lod_float = self._lod_level.to(torch.float32).unsqueeze(1)
             self._lod_level = self.all2all_gaussian_state(lod_float, destination, i2j_send_size).squeeze(1).to(torch.int8)
+
+        if self._ids is not None and self._ids.numel() > 0:
+            self._ids = self.all2all_gaussian_state(
+                self._ids.unsqueeze(1), destination, i2j_send_size).squeeze(1)
+            self._birth_iter = self.all2all_gaussian_state(
+                self._birth_iter.unsqueeze(1), destination, i2j_send_size).squeeze(1)
 
         self.send_to_gpui_cnt = torch.zeros((self.get_xyz.shape[0], comm_group_for_redistribution.size()), dtype=torch.int, device="cuda")
         torch.cuda.empty_cache()

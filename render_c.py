@@ -153,7 +153,6 @@ def render_sets(
             "point_cloud.ply",
         )
 
-        # GaussianModel expects an explicit .ply path here.
         scene = Scene(dataset, gaussians, load_iteration=None, shuffle=False)
 
         bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
@@ -202,8 +201,6 @@ if __name__ == "__main__":
     parser.add_argument("--l", default=-1, type=int)
     parser.add_argument("--r", default=-1, type=int)
     args = get_combined_args(parser)
-    # For render-only execution, keep image tensors local on every rank to avoid
-    # train-time distributed dataset assumptions.
     args.distributed_dataset_storage = False
     args.local_sampling = False
     init_distributed(args)

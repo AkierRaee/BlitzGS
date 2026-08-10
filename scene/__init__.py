@@ -66,7 +66,7 @@ class Scene:
             )
         elif os.path.exists(
             os.path.join(args.source_path, "sparse")
-        ):  # This is the format from colmap.
+        ):
             scene_info = sceneLoadTypeCallbacks["Colmap"](
                 args.source_path, args.images, args.eval, llffhold
             )
@@ -90,23 +90,21 @@ class Scene:
         if shuffle:
             random.shuffle(
                 scene_info.train_cameras
-            )  # Multi-res consistent random shuffling
+            )
             random.shuffle(
                 scene_info.test_cameras
-            )  # Multi-res consistent random shuffling
+            )
 
         utils.log_cpu_memory_usage("before decoding images")
 
         self.cameras_extent = scene_info.nerf_normalization["radius"]
         print(f'camera_extent: {self.cameras_extent}')
-        # Set image size to global variable
         orig_w, orig_h = (
             scene_info.train_cameras[0].width,
             scene_info.train_cameras[0].height,
         )
         res_w, res_h = _get_resolution(orig_w, orig_h, args.resolution)
         utils.set_img_size(res_h, res_w)
-        # Dataset size in GB
         dataset_size_in_GB = (
             1.0
             * (len(scene_info.train_cameras) + len(scene_info.test_cameras))
@@ -119,7 +117,7 @@ class Scene:
         preload_threshold = getattr(args, "preload_dataset_to_gpu_threshold", 3)
         if (
             dataset_size_in_GB < preload_threshold
-        ):  # 10GB memory limit for dataset
+        ):
             log_file.write(
                 f"[NOTE]: Preloading dataset({dataset_size_in_GB}GB) to GPU. Disable local_sampling and distributed_dataset_storage.\n"
             )
@@ -142,7 +140,6 @@ class Scene:
             else:
                 train_cameras = scene_info.train_cameras
             self.train_cameras = cameraList_from_camInfos(train_cameras, args)
-            # output the number of cameras in the training set and image size to the log file
             log_file.write(
                 "Number of local training cameras: {}\n".format(len(self.train_cameras))
             )
@@ -155,7 +152,6 @@ class Scene:
                 )
             
 
-        # if args.eval:
         utils.print_rank_0("Decoding Test Cameras")
         num_test_cameras = getattr(args, "num_test_cameras", -1)
         if num_test_cameras >= 0:
@@ -163,7 +159,6 @@ class Scene:
         else:
             test_cameras = scene_info.test_cameras
         self.test_cameras = cameraList_from_camInfos(test_cameras, args)
-        # output the number of cameras in the training set and image size to the log file
         log_file.write(
             "Number of local test cameras: {}\n".format(len(self.test_cameras))
         )
@@ -198,7 +193,6 @@ class Scene:
             with open(os.path.join(self.model_path, "multi_view.json"), 'w') as file:
                 for id, cur_cam in enumerate(self.train_cameras):
                     sorted_indices = np.lexsort((angles[id], diss[id]))
-                    # sorted_indices = np.lexsort((diss[id], angles[id]))
                     mask = (angles[id][sorted_indices] < args.multi_view_max_angle) & \
                         (diss[id][sorted_indices] > args.multi_view_min_dis) & \
                         (diss[id][sorted_indices] < args.multi_view_max_dis)
@@ -260,7 +254,6 @@ class Scene:
         log_file.write("rotation shape: {}\n".format(self.gaussians._rotation.shape))
 
 
-
 class SceneDataset:
     def __init__(self, cameras):
         self.cameras = cameras
@@ -283,6 +276,10 @@ class SceneDataset:
         self.epoch_time = []
         self.epoch_n_sample = []
 
+        self.per_view_residual = torch.zeros(self.camera_size)
+        self.per_view_seen = torch.zeros(self.camera_size, dtype=torch.long)
+        self._uid_to_pos = {c.uid: i for i, c in enumerate(self.cameras)}
+
     @property
     def cur_epoch(self):
         return len(self.epoch_loss)
@@ -294,14 +291,12 @@ class SceneDataset:
     def get_one_camera(self, batched_cameras_uid, shuffle):
         args = utils.get_args()
         if len(self.cur_epoch_cameras) == 0:
-            # start a new epoch
             if args.local_sampling:
                 self.cur_epoch_cameras = self.sample_camera_idx.copy()
             else:
                 self.cur_epoch_cameras = list(range(self.camera_size))
-            # random.shuffle(self.cur_epoch_cameras)
             if shuffle:
-                indices = torch.randperm(len(self.cur_epoch_cameras))
+                indices = self._epoch_permutation(len(self.cur_epoch_cameras))
             else :
                 indices = torch.arange(len(self.cur_epoch_cameras))
             self.cur_epoch_cameras = [self.cur_epoch_cameras[i] for i in indices]
@@ -315,6 +310,40 @@ class SceneDataset:
         viewpoint_cam = self.cameras[camera_idx]
         return camera_idx, viewpoint_cam
 
+    def _epoch_permutation(self, n):
+        args = self.args
+        use_a2 = getattr(args, "use_error_sampling", False)
+        if not use_a2 or self.cur_iteration < args.densify_from_iter:
+            return torch.randperm(n)
+
+        pos_tensor = torch.tensor(self.cur_epoch_cameras, dtype=torch.long)
+        r = self.per_view_residual[pos_tensor].clone()
+        seen = self.per_view_seen[pos_tensor]
+        if (seen == 0).any():
+            r_max = r.max() if (seen > 0).any() else torch.tensor(1.0)
+            r[seen == 0] = r_max
+        alpha = self._compute_alpha()
+        if alpha <= 0.0:
+            return torch.randperm(n)
+
+        std = r.std().clamp(min=1e-6)
+        logits = alpha * (r - r.mean()) / std
+        w = torch.softmax(logits, dim=0)
+        cap = args.sampling_weight_cap / max(1, n)
+        w = w.clamp(max=cap)
+        w = w / w.sum()
+        return torch.multinomial(w, n, replacement=False)
+
+    def _compute_alpha(self):
+        args = self.args
+        it = self.cur_iteration
+        if it < args.densify_from_iter or it > args.densify_until_iter:
+            return 0.0
+        warmup_end = args.densify_from_iter + args.sampling_alpha_warmup_iters
+        if it < warmup_end:
+            return args.sampling_alpha_final * (it - args.densify_from_iter) / max(1, args.sampling_alpha_warmup_iters)
+        return args.sampling_alpha_final
+
     def get_batched_cameras(self, batch_size, shuffle = True , eval = False):
         assert (
             batch_size <= self.camera_size
@@ -323,8 +352,6 @@ class SceneDataset:
         batched_cameras_uid = []
         batched_nearest_cameras = []
         batched_nearest_cameras_uid = []
-        # for i in range(batch_size):
-            # if i == 0 :
         for i in range(batch_size):
             _, camera = self.get_one_camera(batched_cameras_uid, shuffle = shuffle)
             batched_cameras.append(camera)
@@ -333,7 +360,7 @@ class SceneDataset:
                 if len(camera.nearest_id) > 4:
                     for idx in random.sample(camera.nearest_id,1):
                         while self.cameras[idx].uid in batched_cameras_uid: 
-                            idx = random.sample(camera.nearest_id,1)[0]    #如果id与origin batch重复 重新选camera
+                            idx = random.sample(camera.nearest_id,1)[0]
                         batched_nearest_cameras.append(self.cameras[idx])
                         batched_nearest_cameras_uid.append(self.cameras[idx].uid)
                 else:
@@ -342,7 +369,6 @@ class SceneDataset:
             else:
                 continue
         return batched_cameras, batched_nearest_cameras
-
 
 
     def get_batched_cameras_idx(self, batch_size):
@@ -361,7 +387,20 @@ class SceneDataset:
     def get_batched_cameras_from_idx(self, idx_list):
         return [self.cameras[i] for i in idx_list]
 
-    def update_losses(self, losses):
+    def update_losses(self, losses, cameras=None):
+        if cameras is not None and getattr(self.args, "use_error_sampling", False):
+            ema = float(self.args.residual_ema)
+            for loss, cam in zip(losses, cameras):
+                pos = self._uid_to_pos.get(cam.uid)
+                if pos is None:
+                    continue
+                r = float(loss)
+                if self.per_view_seen[pos] == 0:
+                    self.per_view_residual[pos] = r
+                else:
+                    self.per_view_residual[pos] = ema * float(self.per_view_residual[pos]) + (1.0 - ema) * r
+                self.per_view_seen[pos] += 1
+
         for loss in losses:
             self.iteration_loss.append(loss)
             if len(self.iteration_loss) % self.camera_size == 0:

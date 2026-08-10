@@ -70,3 +70,8 @@ tmp/
 # --- Keep these (negate ignore for repo-shipped assets) ---
 !assets/*.jpg
 !assets/*.png
+
+# --- repo-local additions (2026-07-13) ---
+output
+repo_reproduction/
+run_all_train.sh

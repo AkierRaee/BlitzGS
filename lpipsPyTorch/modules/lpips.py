@@ -21,10 +21,8 @@ class LPIPS(nn.Module):
 
         super(LPIPS, self).__init__()
 
-        # pretrained network
         self.net = get_network(net_type)
 
-        # linear layers
         self.lin = LinLayers(self.net.n_channels_list)
         self.lin.load_state_dict(get_state_dict(net_type, version))
 

@@ -24,8 +24,8 @@ import psutil
 ARGS = None
 LOG_FILE = None
 CUR_ITER = None
-GLOBAL_RANK = None  # rank in all nodes
-LOCAL_RANK = 0  # local rank in the node
+GLOBAL_RANK = None
+LOCAL_RANK = 0
 WORLD_SIZE = 1
 DP_GROUP = None
 MP_GROUP = None
@@ -146,10 +146,8 @@ def globally_sync_for_timer():
 def check_update_at_this_iter(iteration, bsz, update_interval, update_residual):
     residual_l = iteration % update_interval
     residual_r = residual_l + bsz
-    # residual_l <= update_residual < residual_r
     if residual_l <= update_residual and update_residual < residual_r:
         return True
-    # residual_l <= update_residual+update_interval < residual_r
     if (
         residual_l <= update_residual + update_interval
         and update_residual + update_interval < residual_r
@@ -247,12 +245,7 @@ def get_first_rank_on_cur_node():
 
 
 def our_allgather_among_cpu_processes_float_list(data, group):
-    ## official implementation: torch.distributed.all_gather_object()
-    # all_data = [None for _ in range(group.size())]
-    # torch.distributed.all_gather_object(all_data, data, group=group)
 
-    ## my hand-written allgather.
-    # data should a list of floats
     assert isinstance(data, list) and isinstance(
         data[0], float
     ), "data should be a list of float"
@@ -300,10 +293,6 @@ def check_initial_gpu_memory_usage(prefix):
         )
 
 
-
-
-
-
 def get_expon_lr_func(
     lr_init, lr_final, lr_delay_steps=0, lr_delay_mult=1.0, max_steps=1000000
 ):
@@ -324,10 +313,8 @@ def get_expon_lr_func(
 
     def helper(step):
         if step < 0 or (lr_init == 0.0 and lr_final == 0.0):
-            # Disable this parameter
             return 0.0
         if lr_delay_steps > 0:
-            # A kind of reverse cosine decay.
             delay_rate = lr_delay_mult + (1 - lr_delay_mult) * np.sin(
                 0.5 * np.pi * np.clip(step / lr_delay_steps, 0, 1)
             )
@@ -337,9 +324,6 @@ def get_expon_lr_func(
         log_lerp = np.exp(np.log(lr_init) * (1 - t) + np.log(lr_final) * t)
         return delay_rate * log_lerp
     return helper
-
-
-
 
 
 def check_memory_usage(log_file, args, iteration, gaussians, before_densification_stop):
@@ -370,17 +354,13 @@ def check_memory_usage(log_file, args, iteration, gaussians, before_densificatio
         memory_usage_list = our_allgather_among_cpu_processes_float_list(
             [memory_usage], DEFAULT_GROUP
         )
-        # print("total memory: ", torch.cuda.get_device_properties(0).total_memory)
         total_memory = (
             torch.cuda.get_device_properties(0).total_memory / 1024 / 1024 / 1024
         )
         if (
             max([a[0] for a in memory_usage_list])
             > args.densify_memory_limit_percentage * total_memory
-        ):  # If memory usage is reaching the upper bound of GPU memory, stop densification to avoid OOM by fragmentation and etc.
-            # print(
-            #     "Reserved Memory usage is reaching the upper bound of GPU memory. stop densification.\n"
-            # )
+        ):
             log_file.write(
                 "stop densification.\n"
             )
@@ -403,8 +383,6 @@ def PILtoTorch(pil_image, resolution, args, log_file, decompressed_image=None):
         return resized_image.unsqueeze(dim=-1).permute(2, 0, 1)
 
 
-
-
 def PILtoTorch_1(pil_image, resolution=None):
     if resolution is None:
         resized_image_PIL = pil_image
@@ -415,9 +393,6 @@ def PILtoTorch_1(pil_image, resolution=None):
         return resized_image.permute(2, 0, 1)
     else:
         return resized_image.unsqueeze(dim=-1).permute(2, 0, 1)
-
-
-
 
 
 def get_expon_lr_func(
@@ -440,10 +415,8 @@ def get_expon_lr_func(
 
     def helper(step):
         if step < 0 or (lr_init == 0.0 and lr_final == 0.0):
-            # Disable this parameter
             return 0.0
         if lr_delay_steps > 0:
-            # A kind of reverse cosine decay.
             delay_rate = lr_delay_mult + (1 - lr_delay_mult) * np.sin(
                 0.5 * np.pi * np.clip(step / lr_delay_steps, 0, 1)
             )
@@ -546,7 +519,6 @@ def safe_state(silent):
 def prepare_output_and_logger(args):
     global GLOBAL_RANK
 
-    # Set up output folder
     if GLOBAL_RANK != 0:
         return
     print_rank_0("Output folder: {}".format(args.model_path))
@@ -579,7 +551,7 @@ def merge_multiple_checkpoints(checkpoint_files):
     start_from_this_iteration = 0
     for checkpoint_file in checkpoint_files:
         (model_params, start_from_this_iteration) = torch.load(
-            checkpoint_file, map_location=f"cuda:{LOCAL_RANK}"
+            checkpoint_file, map_location=f"cuda:{LOCAL_RANK}", weights_only=False
         )
         all_model_params.append(model_params)
 
@@ -627,7 +599,7 @@ def get_part_of_checkpoints(checkpoint_file, num_parts, part_id):
     global LOCAL_RANK
 
     (model_params, start_from_this_iteration) = torch.load(
-        checkpoint_file, map_location=f"cuda:{LOCAL_RANK}"
+        checkpoint_file, map_location=f"cuda:{LOCAL_RANK}", weights_only=False
     )
 
     num_gaussians = model_params[1].shape[0]
@@ -710,7 +682,6 @@ def load_checkpoint(args):
     if args.start_checkpoint[-1] != "/":
         args.start_checkpoint += "/"
     if number_files == DEFAULT_GROUP.size():
-        # file_name = args.start_checkpoint+"chkpnt" + str(DEFAULT_GROUP.rank()) + ".pth"
         file_name = (
             args.start_checkpoint
             + "chkpnt_ws="
@@ -719,7 +690,7 @@ def load_checkpoint(args):
             + str(DEFAULT_GROUP.rank())
             + ".pth"
         )
-        (model_params, start_from_this_iteration) = torch.load(file_name)
+        (model_params, start_from_this_iteration) = torch.load(file_name, weights_only=False)
 
     elif number_files > DEFAULT_GROUP.size():
         assert (
@@ -743,7 +714,6 @@ def load_checkpoint(args):
         assert (
             DEFAULT_GROUP.size() % number_files == 0
         ), "The number of files in the checkpoint folder must be a divisor of the number of processes."
-        # file_name = args.start_checkpoint+"chkpnt" + str(DEFAULT_GROUP.rank() % number_files) + ".pth"
         file_name = (
             args.start_checkpoint
             + "chkpnt_ws="

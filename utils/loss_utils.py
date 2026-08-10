@@ -81,9 +81,6 @@ def _ssim(img1, img2, window, window_size, channel, size_average=True):
 
 
 def pixelwise_l1_with_mask(img1, img2, pixel_mask):
-    # img1, img2: (3, H, W)
-    # pixel_mask: (H, W) bool torch tensor as mask.
-    # only compute l1 loss for the pixels that are touched
 
     pixelwise_l1_loss = torch.abs((img1 - img2)) * pixel_mask.unsqueeze(0)
     return pixelwise_l1_loss

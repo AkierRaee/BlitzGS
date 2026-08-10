@@ -53,7 +53,6 @@ class Camera(nn.Module):
         self.T = T
         self.FoVx = FoVx
         self.FoVy = FoVy
-        # self.image_path = image_path
         self.image_width = image_width
         self.image_height = image_height
         self.resolution = (image_width, image_height)
@@ -84,7 +83,6 @@ class Camera(nn.Module):
             )
             or (not args.distributed_dataset_storage)
         ):
-            # load to cpu
             if image is not None:
                 self.original_image_backup = image.contiguous()
             if args.preload_dataset_to_gpu:
@@ -103,11 +101,6 @@ class Camera(nn.Module):
                 else:
                     self.invdepthmap_backup = invdepthmaps.contiguous()
                     self.invdepthmap = None
-            # if depth_mask is not None:
-            #     self.depth_mask = depth_mask.contiguous()
-            #     if invdepthmaps is not None and depth_mask is not None:
-            #         # Use depth_mask to set invdepthmaps to 0 where mask is 0
-                    # self.invdepthmap_backup[self.depth_mask.unsqueeze(0) == 0] = 0
         else:
             self.original_image_backup = None
             self.image_height, self.image_width = utils.get_img_size()
@@ -150,7 +143,7 @@ class Camera(nn.Module):
         return self.world_view_transform_backup.t().inverse()
     def get_calib_matrix_nerf(self, scale=1.0):
         intrinsic_matrix = torch.tensor([[self.Fx/scale, 0, self.Cx/scale], [0, self.Fy/scale, self.Cy/scale], [0, 0, 1]]).float()
-        extrinsic_matrix = self.world_view_transform.transpose(0,1).contiguous() # cam2world
+        extrinsic_matrix = self.world_view_transform.transpose(0,1).contiguous()
         return intrinsic_matrix, extrinsic_matrix
     def get_rays(self, scale=1.0):
         W, H = int(self.image_width/scale), int(self.image_height/scale)
@@ -162,7 +155,6 @@ class Camera(nn.Module):
                     torch.ones_like(ix)], -1).float().cuda()
         return rays_d
     def update(self, dx, dy, dz):
-        # Update the position of this camera pose.
         with torch.no_grad():
             c2w = self.get_camera2world()
             c2w[0, 3] += dx
@@ -171,7 +163,6 @@ class Camera(nn.Module):
 
             t_prime = c2w[:3, 3]
             self.T = (-c2w[:3, :3].t() @ t_prime).cpu().numpy()
-            # import pdb; pdb.set_trace()
 
             self.world_view_transform = (
                 torch.tensor(getWorld2View2(self.R, self.T, self.trans, self.scale))

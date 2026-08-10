@@ -42,7 +42,7 @@ class ParamGroup:
                     group.add_argument("--" + key, default=value, action="store_true")
                 elif t == list:
                     type_to_use = int
-                    if value is not None and len(value) > 0: #if len(value) > 0:
+                    if value is not None and len(value) > 0:
                         type_to_use = type(value[0])
                     group.add_argument(
                         "--" + key, default=value, nargs="+", type=type_to_use
@@ -71,7 +71,7 @@ class AuxiliaryParams(ParamGroup):
         self.log_folder = "/tmp/gaussian_splatting"
         self.log_interval = 250
         self.llffhold = 83
-        self.backend = "default" # "default"
+        self.backend = "default"
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
@@ -97,7 +97,7 @@ class ModelParams(ParamGroup):
         self._resolution = 1
         self.data_device = "cuda"
         self.ds = 1
-        self.ratio = 1 # sampling the input point cloud
+        self.ratio = 1
         self.undistorted = False 
 
         self.load_iteration = None
@@ -148,6 +148,7 @@ class OptimizationParams(ParamGroup):
         self.lambda_dssim = 0.2
         self.densification_interval = 1000
         self.opacity_reset_interval = 3000
+        self.scale_reset_factor = 0.0
         self.densify_from_iter = 2000
         self.densify_until_iter = self.iterations//2
         self.densify_grad_threshold = 0.0002
@@ -157,7 +158,7 @@ class OptimizationParams(ParamGroup):
         self.opacity_reset_until_iter = -1
         self.random_background = False
         self.min_opacity = 0.005
-        self.lr_scale_mode = "sqrt"  # can be "linear", "sqrt", or "accumu"
+        self.lr_scale_mode = "sqrt"
 
 
         self.wo_image_weight = False
@@ -187,13 +188,29 @@ class OptimizationParams(ParamGroup):
         self.disable_phi_weighting = False
         self.disable_simp1_prune = False
         self.disable_simp2_prune = False
+        self.view_normalized_importance = False
+        self.simp2_cdf_thres = 0.99
+        self.spawn_gate = ""
+        self.spawn_gate_k = 0.4
+        self.spawn_gate_start = 16000
+
+        self.use_topk_densify = False
+        self.birth_rate = 0.05
+        self.birth_schedule = "cosine"
+        self.topk_score = "grad"
+
+        self.use_error_sampling = False
+        self.residual_ema = 0.9
+        self.sampling_alpha_final = 1.0
+        self.sampling_alpha_warmup_iters = 2000
+        self.sampling_weight_cap = 4.0
+        self.residual_metric = "l1"
 
         super().__init__(parser, "Optimization Parameters")
 
 
 class DistributionParams(ParamGroup):
     def __init__(self, parser):
-        # Distribution for pixel-wise workloads.
         self.image_distribution = True
         self.image_distribution_mode = "final"
         self.heuristic_decay = 0.0
@@ -202,28 +219,26 @@ class DistributionParams(ParamGroup):
         self.adjust_strategy_warmp_iterations = -1
         self.save_strategy_history = False
 
-        # Distribution for 3DGS-wise workloads.
         self.gaussians_distribution = True
-        self.redistribute_anchor_mode = "random_redistribute"  # "no_redistribute"
+        self.redistribute_anchor_mode = "random_redistribute"
         self.redistribute_anchors_frequency = (
-            10 # redistribution frequency for anchors.
+            10
         )
         self.redistribute_gaussians_threshold = (
-            1.1  # threshold to apply redistribution for 3DGS storage location
+            1.1
         )
-        self.sync_grad_mode = "dense"  # "dense", "sparse", "fused_dense", "fused_sparse" gradient synchronization. Only use when gaussians_distribution is False.
-        self.grad_normalization_mode = "none"  # "divide_by_visible_count", "square_multiply_by_visible_count", "multiply_by_visible_count", "none" gradient normalization mode.
+        self.sync_grad_mode = "dense"
+        self.grad_normalization_mode = "none"
 
-        # Dataset and Model save
-        self.bsz = 1  # batch size.
-        self.distributed_dataset_storage = True  # if True, we store dataset only on rank 0 and broadcast to other ranks.
+        self.bsz = 1
+        self.distributed_dataset_storage = True
         self.distributed_save = False
         self.local_sampling = False
         self.preload_dataset_to_gpu = (
-            False  # By default, we do not preload dataset to GPU.
+            False
         )
         self.preload_dataset_to_gpu_threshold = (
-            3  # unit is GB, by default 10GB memory limit for dataset.
+            3
         )
         self.multiprocesses_image_loading = True
         self.num_train_cameras = -1
@@ -235,10 +250,10 @@ class DistributionParams(ParamGroup):
 
 class BenchmarkParams(ParamGroup):
     def __init__(self, parser):
-        self.enable_timer = False  # Log running time from python side.
-        self.end2end_time = False  # Log end2end training time.
-        self.check_gpu_memory = False  # check gpu memory usage.
-        self.check_cpu_memory = False  # check cpu memory usage.
+        self.enable_timer = False
+        self.end2end_time = False
+        self.check_gpu_memory = False
+        self.check_cpu_memory = False
         self.log_memory_summary = False
 
         super().__init__(parser, "Benchmark Parameters")
@@ -247,12 +262,12 @@ class BenchmarkParams(ParamGroup):
 class DebugParams(ParamGroup):
     def __init__(self, parser):
         self.stop_update_param = (
-            False  # stop updating parameters. No optimizer.step() will be called.
+            False
         )
-        self.time_image_loading = False  # Log image loading time.
+        self.time_image_loading = False
 
-        self.nsys_profile = False  # profile with nsys.
-        self.drop_initial_3dgs_p = 0.0  # profile with nsys.
+        self.nsys_profile = False
+        self.drop_initial_3dgs_p = 0.0
         self.drop_duplicate_gaussians_coeff = 1.0
 
         super().__init__(parser, "Debug Parameters")
@@ -291,7 +306,6 @@ def get_combined_args(parser: ArgumentParser, auto_find_cfg_args_path=False):
 
 
 def print_all_args(args, log_file):
-    # print all arguments in a readable format, each argument in a line.
     log_file.write("arguments:\n")
     log_file.write("-" * 30 + "\n")
     for arg in vars(args):
@@ -306,7 +320,6 @@ def print_all_args(args, log_file):
         + str(args.bsz)
         + "\n"
     )
-
 
 
 def find_latest_checkpoint(log_folder):
@@ -324,7 +337,6 @@ def init_args(args):
     if args.opacity_reset_until_iter == -1:
         args.opacity_reset_until_iter = args.densify_until_iter + args.bsz
 
-    # Logging are saved with where model is saved.
     args.log_folder = args.model_path
 
     if args.auto_start_checkpoint:
@@ -348,12 +360,10 @@ def init_args(args):
     if not args.gaussians_distribution:
         args.distributed_save = False
 
-    # sort test_iterations
     args.test_iterations.sort()
     args.save_iterations.sort()
     if len(args.save_iterations) > 0 and args.iterations not in args.save_iterations:
         args.save_iterations.append(args.iterations)
     args.checkpoint_iterations.sort()
 
-    # Set up global args
     utils.set_args(args)

@@ -79,23 +79,32 @@ data/
 
 ## 🚀 Training
 
-Use [`run_train_final.sh`](run_train_final.sh). Edit the dataset and output paths at the top of the script, then run it directly.
-
-## 🎨 Rendering and Evaluation
+One script per benchmark scene, using the paper configuration. Each script trains, renders the evaluation split, and computes PSNR / SSIM / LPIPS:
 
 ```bash
-# Render a trained model (multi-GPU)
-torchrun --nproc_per_node <num_gpus> render_c.py \
-    -m <model_path> \
-    -s <dataset_split_path> \
-    --images images \
-    --resolution 4 \
-    --iteration <max_iters> \
-    --skip_train --eval
-
-# Compute PSNR / SSIM / LPIPS
-python metrics.py -m <model_path> --mode <split_name> --num_gpus <num_gpus>
+bash scripts/train_building.sh      # Mill-19 Building
+bash scripts/train_rubble.sh        # Mill-19 Rubble
+bash scripts/train_residence.sh     # UrbanScene3D Residence
+bash scripts/train_sciart.sh        # UrbanScene3D Sci-Art
+bash scripts/train_matrixcity.sh    # MatrixCity aerial
 ```
+
+Dataset path, output folder, and GPU count can be overridden with environment variables:
+
+```bash
+DATA=data/rubble-pixsfm OUT=output/rubble NPROC=4 bash scripts/train_rubble.sh
+```
+
+The scripts enable the spawn gate, which vetoes densification candidates predicted not to survive, using the pretrained survival models shipped in `models/`. Each benchmark script loads the gate model fitted with that scene held out (`spawn_gate_LOSO_*.pkl`).
+
+## 🙏 Acknowledgements
+
+We thank the authors of the following open-source projects for their excellent work, which this codebase builds upon:
+
+- [3D Gaussian Splatting](https://github.com/graphdeco-inria/gaussian-splatting) 
+- [CityGS-X](https://github.com/gyy456/CityGS-X)
+- [Octree-AnyGS](https://github.com/city-super/Octree-AnyGS)
+- [mini-splatting2](https://github.com/fatPeter/mini-splatting2)
 
 ## 📞 Contact
 

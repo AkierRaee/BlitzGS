@@ -110,12 +110,11 @@ def evaluate(model_paths, mode, num_gpus=1):
                 continue
 
             if num_gpus > 1:
-                # Split filenames into num_gpus chunks
                 chunks = [fnames[i::num_gpus] for i in range(num_gpus)]
                 worker_args = [
                     (i, chunk, str(renders_dir), str(gt_dir))
                     for i, chunk in enumerate(chunks)
-                    if chunk  # skip empty chunks if #images < num_gpus
+                    if chunk
                 ]
 
                 ctx = tmp.get_context("spawn")
@@ -126,7 +125,6 @@ def evaluate(model_paths, mode, num_gpus=1):
                             chunk_results.append(result)
                             pbar.update(len(result))
 
-                # Flatten and sort by filename for determinism
                 flat = [item for chunk in chunk_results for item in chunk]
                 flat.sort(key=lambda x: x[0])
 
@@ -135,7 +133,6 @@ def evaluate(model_paths, mode, num_gpus=1):
                 psnrs  = [torch.tensor(r[2]) for r in flat]
                 lpipss = [torch.tensor(r[3]) for r in flat]
 
-                # Write per-image txt log
                 with open(txt_path, "a") as f:
                     for name, s, p, l in zip(image_names, ssims, psnrs, lpipss):
                         f.write(f"ssim:{float(s)},psnr:{float(p)},lpips:{float(l)}img:{name}\n")
@@ -185,7 +182,6 @@ def evaluate(model_paths, mode, num_gpus=1):
 
 
 if __name__ == "__main__":
-    # Set spawn start method globally so child processes don't inherit CUDA state
     tmp.set_start_method("spawn", force=True)
 
     device = torch.device("cuda:0")

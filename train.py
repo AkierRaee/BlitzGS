@@ -30,7 +30,6 @@ from arguments import (
 import train_internal
 import debugpy
 if __name__ == "__main__":
-    # Set up command line argument parser
     parser = ArgumentParser(description="Training script parameters")
     ap = AuxiliaryParams(parser)
     lp = ModelParams(parser)
@@ -45,29 +44,24 @@ if __name__ == "__main__":
 
     init_distributed(args)
 
-    ## Prepare arguments.
-    # Check arguments
     init_args(args)
 
     args = utils.get_args()
 
-    # create log folder
     if utils.GLOBAL_RANK == 0:
         os.makedirs(args.log_folder, exist_ok=True)
         os.makedirs(args.model_path, exist_ok=True)
     if utils.WORLD_SIZE > 1:
         torch.distributed.barrier(
             group=utils.DEFAULT_GROUP
-        )  # log_folder is created before other ranks start writing log.
+        )
     if utils.GLOBAL_RANK == 0:
         with open(args.log_folder + "/args.json", "w") as f:
             json.dump(vars(args), f)
 
-    # Initialize system state (RNG)
     safe_state(args.quiet)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
 
-    # Initialize log file and print all args
     log_file = open(
         args.log_folder
         + "/python_ws="
@@ -81,10 +75,9 @@ if __name__ == "__main__":
     print_all_args(args, log_file)
 
     train_internal.training(
-        lp.extract(args), op.extract(args), pp.extract(args), args, log_file
+        lp.extract(args), op.extract(args), pp.extract(args), args, log_file,
     )
 
-    # All done
     if utils.WORLD_SIZE > 1:
         torch.distributed.barrier(group=utils.DEFAULT_GROUP)
     utils.print_rank_0("\nTraining complete.")

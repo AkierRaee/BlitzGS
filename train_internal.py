@@ -1,4 +1,5 @@
 import os
+import math
 import time
 import torch
 import json
@@ -32,6 +33,24 @@ from gaussian_renderer import distributed_preprocess3dgs_and_all2all_final, rend
 
 _FINITE_CHECK = os.environ.get("BLITZGS_FINITE_CHECK", "0") == "1"
 
+
+def compute_K_global(iteration, n_anchors_global, opt_args):
+    t_start = opt_args.densify_from_iter
+    t_end = opt_args.densify_until_iter
+    if iteration <= t_start or iteration > t_end:
+        return 0
+    t = (iteration - t_start) / max(1, t_end - t_start)
+    t = max(0.0, min(1.0, t))
+    if opt_args.birth_schedule == "cosine":
+        gate = 0.5 * (1.0 + math.cos(math.pi * t))
+    elif opt_args.birth_schedule == "linear":
+        gate = 1.0 - t
+    elif opt_args.birth_schedule == "constant":
+        gate = 1.0
+    else:
+        raise ValueError(f"unknown birth_schedule: {opt_args.birth_schedule}")
+    return int(opt_args.birth_rate * n_anchors_global * gate)
+
 def _finite_check(gaussians, label, iteration):
     if not _FINITE_CHECK:
         return
@@ -50,38 +69,57 @@ def visualize_scalars(scalar_tensor: torch.Tensor) -> np.ndarray:
     mi = torch.quantile(to_use, 0.05)
     ma = torch.quantile(to_use, 0.95)
 
-    scalar_tensor = (scalar_tensor - mi) / max(ma - mi, 1e-8)  # normalize to 0~1
+    scalar_tensor = (scalar_tensor - mi) / max(ma - mi, 1e-8)
     scalar_tensor = scalar_tensor.clamp_(0, 1)
 
-    scalar_tensor = ((1 - scalar_tensor) * 255).byte().numpy()  # inverse heatmap
+    scalar_tensor = ((1 - scalar_tensor) * 255).byte().numpy()
     return cv2.cvtColor(cv2.applyColorMap(scalar_tensor, cv2.COLORMAP_INFERNO), cv2.COLOR_BGR2RGB)
 
 
 def training(dataset_args, opt_args, pipe_args, args, log_file):
 
-    # Init auxiliary tools
     timers = Timer(args)
     utils.set_timers(timers)
     prepare_output_and_logger(dataset_args)
     utils.log_cpu_memory_usage("at the beginning of training")
     start_from_this_iteration = 1
 
-    # Init parameterized scene (standard 3DGS init)
     gaussians = GaussianModel(dataset_args.sh_degree)
     
     with torch.no_grad():
         scene = Scene(args, gaussians, args.load_iteration)
         gaussians.training_setup(opt_args)
         
-        # Per-camera culling initialization
         if hasattr(gaussians, 'init_culling'):
             gaussians.init_culling(len(scene.getTrainCameras()))
             
+        ids_restored = False
         if args.start_checkpoint != "":
             model_params, start_from_this_iteration = utils.load_checkpoint(args)
             gaussians.restore(model_params, opt_args)
-            utils.print_rank_0("Restored from checkpoint: {}".format(args.start_checkpoint))
-            log_file.write("Restored from checkpoint: {}\n".format(args.start_checkpoint))
+            ids_restored = gaussians.load_id_state(args.start_checkpoint)
+            utils.print_rank_0("Restored from checkpoint: {} (id_state: {})".format(
+                args.start_checkpoint, ids_restored))
+            log_file.write("Restored from checkpoint: {} (id_state: {})\n".format(
+                args.start_checkpoint, ids_restored))
+
+        _id_ok = args.start_checkpoint == "" or ids_restored
+
+        if getattr(opt_args, "spawn_gate", ""):
+            if not _id_ok:
+                utils.print_rank_0("[SpawnGate] SKIPPED: resumed without id_state sidecar")
+            else:
+                from scene.spawn_gate import SpawnGate
+                gaussians.init_spawn_gate(
+                    SpawnGate(opt_args.spawn_gate, opt_args.spawn_gate_k, opt_args.spawn_gate_start))
+                utils.print_rank_0(
+                    "[SpawnGate] enabled: spec={} k={} start_iter={} meta={}".format(
+                        opt_args.spawn_gate, opt_args.spawn_gate_k, opt_args.spawn_gate_start,
+                        gaussians.spawn_gate.meta))
+                if opt_args.use_topk_densify:
+                    utils.print_rank_0(
+                        "[SpawnGate] WARNING: --use_topk_densify is on — the A1 top-K path "
+                        "bypasses the spawn gate entirely; the gate will have NO effect.")
 
         scene.log_scene_info_to_file(log_file, "Scene Info Before Training")
     utils.check_initial_gpu_memory_usage("after init and before training loop")
@@ -112,13 +150,17 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
 
     ema_loss_for_log = 0
 
-    # --- Perf instrumentation (memory + speed) ---
     torch.cuda.reset_peak_memory_stats()
     _perf_mem_sum_mb = 0.0
     _perf_mem_samples = 0
     _perf_iters_done = 0
+    _simp_iters = {opt_args.simp_iteration1, opt_args.simp_iteration2} if opt_args.use_ms_culling else set()
+    _render_wall_s = 0.0
+    _render_images = 0
+    _camera_render_counts = {}
     torch.cuda.synchronize()
     _perf_t0 = time.time()
+    _iter_t0 = time.time()
 
     for iteration in range(start_from_this_iteration, opt_args.iterations + 1, args.bsz):
         if iteration // args.bsz % 30 == 0:
@@ -146,6 +188,13 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
         else:
             batched_cameras, batched_nearest_cameras = train_dataset.get_batched_cameras(args.bsz)
 
+        _is_simp_iter = any(iteration <= s < iteration + args.bsz for s in _simp_iters)
+        if not _is_simp_iter:
+            for cam in batched_cameras:
+                _camera_render_counts[cam.image_name] = _camera_render_counts.get(cam.image_name, 0) + 1
+        _iter_t0 = time.time()
+        _iter_visible_gs = 0
+
         with torch.no_grad():
             timers.start("prepare_strategies")
             batched_strategies, gpuid2tasks = start_strategy_final(batched_cameras, strategy_history)
@@ -157,7 +206,7 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
 
         batched_voxel_mask =[None for _ in batched_cameras]
         batched_nearest_voxel_mask =[None for _ in batched_nearest_cameras]
-        
+
         retain_grad = (iteration < opt_args.update_until and iteration >= 0)
 
         batched_screenspace_pkg = distributed_preprocess3dgs_and_all2all_final(
@@ -214,7 +263,7 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
             batched_loss_cpu = batched_loss.cpu().numpy()
             ema_loss_for_log = batched_loss_cpu.mean() if ema_loss_for_log is None else 0.6 * ema_loss_for_log + 0.4 * batched_loss_cpu.mean()
             
-            train_dataset.update_losses(batched_loss_cpu)
+            train_dataset.update_losses(batched_loss_cpu, cameras=batched_cameras)
             batched_loss_cpu =[round(loss, 6) for loss in batched_loss_cpu]
             log_string = "iteration[{},{}) loss: {} image: {}\n".format(iteration, iteration + args.bsz, batched_loss_cpu,[cam.image_name for cam in batched_cameras])
             log_file.write(log_string)
@@ -224,7 +273,6 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
             training_report(iteration, l1_loss, args.test_iterations, scene, pipe_args, background, args.backend, dataset_args.model_path)
             end2end_timers.start()
 
-            # LOD diagnostics
             diag_interval = getattr(opt_args, 'octree_diag_interval', 0)
             if (getattr(opt_args, 'use_octree_lod', False)
                     and diag_interval > 0
@@ -269,13 +317,19 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
                         print(probe_line)
                         log_file.write(probe_line + "\n")
 
+            _batched_vis_filter_all = batched_screenspace_pkg.get(
+                "batched_locally_preprocessed_visibility_filter", []
+            )
+            _batched_compute_locally_all = batched_compute_locally
+            for _i, _vf in enumerate(_batched_vis_filter_all):
+                if _i < len(_batched_compute_locally_all) and _batched_compute_locally_all[_i]:
+                    _iter_visible_gs += int(_vf.sum().item())
+
             if iteration < opt_args.densify_until_iter:
                 batched_viewspace_points = batched_screenspace_pkg.get(
                     "batched_locally_preprocessed_mean2D", []
                 )
-                batched_visibility_filter = batched_screenspace_pkg.get(
-                    "batched_locally_preprocessed_visibility_filter", []
-                )
+                batched_visibility_filter = _batched_vis_filter_all
                 batched_radii = batched_screenspace_pkg.get(
                     "batched_locally_preprocessed_radii", []
                 )
@@ -283,12 +337,11 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
                     "batched_lod_masks", []
                 )
 
-                # 1. Accumulate point statistics over the batch
                 for i, camera in enumerate(batched_cameras):
                     if i >= len(batched_compute_locally) or not batched_compute_locally[i]:
-                        continue # Skip if computed on a remote GPU
+                        continue
                     if i >= len(batched_viewspace_points) or i >= len(batched_visibility_filter) or i >= len(batched_radii):
-                        continue # Skip if computed on a remote GPU
+                        continue
 
                     viewspace_points = batched_viewspace_points[i]
                     visibility_filter = batched_visibility_filter[i]
@@ -296,7 +349,7 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
                     lod_indices = batched_lod_masks[i] if i < len(batched_lod_masks) else None
 
                     if lod_indices is not None:
-                        full_vis = visibility_filter  # already full-size bool mask
+                        full_vis = visibility_filter
                         gaussians.max_radii2D[full_vis] = torch.max(
                             gaussians.max_radii2D[full_vis], radii[full_vis]
                         )
@@ -320,6 +373,10 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
                 if iteration > opt_args.densify_from_iter and (iteration // opt_args.densification_interval) != ((iteration - args.bsz) // opt_args.densification_interval):
                     size_threshold = 20 if iteration > opt_args.opacity_reset_interval else None
 
+                    _grad_active = int((gaussians.denom > 0).sum().item())
+                    _grad_total = int(gaussians.denom.shape[0])
+                    _grad_efficiency = _grad_active / max(_grad_total, 1)
+
                     _n_before_local = int(gaussians.get_xyz.shape[0])
                     _n_before_total = _n_before_local
                     if utils.WORLD_SIZE > 1:
@@ -327,24 +384,41 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
                         dist.all_reduce(_t, op=dist.ReduceOp.SUM)
                         _n_before_total = int(_t.item())
 
-                    gaussians.densify_and_prune(opt_args.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
+                    _K_requested = 0
+                    if opt_args.use_topk_densify:
+                        _K_requested = compute_K_global(iteration, _n_before_total, opt_args)
+                        _peak_local = gaussians.densify_and_prune_topk(
+                            _K_requested, 0.005, scene.cameras_extent, size_threshold,
+                            score_mode=opt_args.topk_score,
+                        )
+                    else:
+                        _peak_local = gaussians.densify_and_prune(opt_args.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
                     _finite_check(gaussians, "after_densify", iteration)
 
                     _n_after_local = int(gaussians.get_xyz.shape[0])
                     _n_after_total = _n_after_local
+                    _peak_total = _peak_local
                     if utils.WORLD_SIZE > 1:
                         _t = torch.tensor([_n_after_local], dtype=torch.long, device="cuda")
                         dist.all_reduce(_t, op=dist.ReduceOp.SUM)
                         _n_after_total = int(_t.item())
+                        _t2 = torch.tensor([_peak_local], dtype=torch.long, device="cuda")
+                        dist.all_reduce(_t2, op=dist.ReduceOp.SUM)
+                        _peak_total = int(_t2.item())
                     _delta = _n_after_total - _n_before_total
+                    _grown = _peak_total - _n_before_total
+                    _pruned = _peak_total - _n_after_total
                     _sign = "+" if _delta >= 0 else ""
                     if utils.LOCAL_RANK == 0:
+                        _extra = " K_req={}".format(_K_requested) if opt_args.use_topk_densify else ""
                         _msg = (
-                            "[GSCount iter={}] before={} after={} delta={}{} "
-                            "(local before={} after={})\n"
+                            "[GSCount iter={}] before={} peak={} after={} delta={}{} "
+                            "grown={} pruned={} grad_active={}/{} ({:.1%}) "
+                            "(local before={} after={}){}\n"
                         ).format(
-                            iteration, _n_before_total, _n_after_total, _sign, _delta,
-                            _n_before_local, _n_after_local,
+                            iteration, _n_before_total, _peak_total, _n_after_total, _sign, _delta,
+                            _grown, _pruned, _grad_active, _grad_total, _grad_efficiency,
+                            _n_before_local, _n_after_local, _extra,
                         )
                         print(_msg, end="")
                         log_file.write(_msg)
@@ -352,6 +426,20 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
                     if utils.WORLD_SIZE > 1:
                         gaussians.redistribute_gaussians()
                     _finite_check(gaussians, "after_redistribute", iteration)
+
+            if opt_args.scale_reset_factor > 0.0 and opt_args.scale_reset_factor != 1.0:
+                _scale_reset_interval = 2 * opt_args.opacity_reset_interval
+                _scale_reset_cutoff = opt_args.densify_until_iter - _scale_reset_interval
+                _crosses = (iteration // _scale_reset_interval) != ((iteration - args.bsz) // _scale_reset_interval)
+                if _crosses and iteration >= _scale_reset_interval and iteration < _scale_reset_cutoff:
+                    gaussians.reset_scaling(opt_args.scale_reset_factor)
+                    _finite_check(gaussians, "after_scale_reset", iteration)
+                    if utils.LOCAL_RANK == 0:
+                        _msg = "[ScaleReset iter={}] factor={:.3f}\n".format(
+                            iteration, opt_args.scale_reset_factor
+                        )
+                        print(_msg, end="")
+                        log_file.write(_msg)
 
             if (opt_args.use_ms_culling
                     and (iteration <= opt_args.simp_iteration1 < iteration + args.bsz)):
@@ -403,9 +491,14 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
                     (gaussians.capture(), iteration + args.bsz),
                     save_folder + "/chkpnt_ws=" + str(utils.WORLD_SIZE) + "_rk=" + str(utils.GLOBAL_RANK) + ".pth",
                 )
+                idstate_folder = scene.model_path + "/checkpoints_idstate/" + str(iteration) + "/"
+                if utils.DEFAULT_GROUP.rank() == 0:
+                    os.makedirs(idstate_folder, exist_ok=True)
+                if utils.DEFAULT_GROUP.size() > 1:
+                    torch.distributed.barrier(group=utils.DEFAULT_GROUP)
+                gaussians.save_id_state(idstate_folder)
                 end2end_timers.start()
 
-            # Optimizer step
             if iteration < opt_args.iterations:
                 timers.start("optimizer_step")
                 if args.lr_scale_mode != "accumu":  
@@ -439,7 +532,6 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
                                     dtype=torch.int,
                                     device="cuda",
                                 )
-                        # Sparse CUDA Adam expects a 1D bool mask of length N.
                         visibility = visibility.reshape(-1)
                         if visibility.shape[0] != gaussians.get_xyz.shape[0]:
                             visibility = torch.ones(
@@ -456,12 +548,12 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
                 gaussians.optimizer.zero_grad(set_to_none=True)
                 timers.stop("optimizer_step")
 
-        # Finish iteration clean up
         torch.cuda.synchronize()
+        _iter_wall_s = time.time() - _iter_t0
         for viewpoint_cam in batched_cameras:
             viewpoint_cam.original_image = None
             if args.distributed_dataset_storage:
-                viewpoint_cam.image_gray = None 
+                viewpoint_cam.image_gray = None
                 viewpoint_cam.invdepthmap = None
         if args.nsys_profile:
             nvtx.range_pop()
@@ -469,10 +561,25 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
             timers.printTimers(iteration, mode="sum")
         log_file.flush()
 
-        # Per-iteration memory sample (MB, currently-allocated, cheap)
-        _perf_mem_sum_mb += torch.cuda.memory_allocated() / (1024 * 1024)
+        _cur_mem_mb = torch.cuda.memory_allocated() / (1024 * 1024)
+        _peak_mem_mb = torch.cuda.max_memory_allocated() / (1024 * 1024)
+        _perf_mem_sum_mb += _cur_mem_mb
         _perf_mem_samples += 1
         _perf_iters_done += 1
+        if not _is_simp_iter:
+            _render_wall_s += _iter_wall_s
+            _render_images += args.bsz
+        n_gaussians = gaussians.get_xyz.shape[0]
+        _throughput = args.bsz / max(_iter_wall_s, 1e-9)
+        log_file.write(
+            "[PerfIter iter={}] iter_wall={:.4f}s bsz={} is_simp={} "
+            "cur_mem={:.1f}MB peak_mem={:.1f}MB n_gaussians={} "
+            "visible_gs={} throughput={:.2f}img/s\n".format(
+                iteration, _iter_wall_s, args.bsz, int(_is_simp_iter),
+                _cur_mem_mb, _peak_mem_mb, n_gaussians,
+                _iter_visible_gs, _throughput,
+            )
+        )
 
     torch.cuda.synchronize()
     _perf_elapsed = max(time.time() - _perf_t0, 1e-9)
@@ -480,17 +587,53 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
     _perf_avg_mb = (_perf_mem_sum_mb / _perf_mem_samples) if _perf_mem_samples > 0 else 0.0
     _perf_iters_per_sec = _perf_iters_done / _perf_elapsed
     _perf_sec_per_iter = _perf_elapsed / max(_perf_iters_done, 1)
+
+    _sec_per_image = _render_wall_s / max(_render_images, 1)
+
+    _n_unique_cams = len(_camera_render_counts)
+    _total_cam_renders = sum(_camera_render_counts.values())
+    _render_amplification = _total_cam_renders / max(_n_unique_cams, 1)
+    if _camera_render_counts:
+        _counts_sorted = sorted(_camera_render_counts.values())
+        def _pct(p):
+            if not _counts_sorted:
+                return 0
+            k = max(0, min(len(_counts_sorted) - 1, int(round(p * (len(_counts_sorted) - 1)))))
+            return _counts_sorted[k]
+        _p50 = _pct(0.50); _p90 = _pct(0.90); _p99 = _pct(0.99)
+        _max_renders = _counts_sorted[-1]
+        _min_renders = _counts_sorted[0]
+    else:
+        _p50 = _p90 = _p99 = _max_renders = _min_renders = 0
+
     _perf_summary = (
-        "[Perf] peak_mem={:.1f} MB  avg_mem={:.1f} MB  "
-        "elapsed={:.1f} s  iters={}  speed={:.2f} it/s ({:.4f} s/it)\n"
+        "[Perf] peak_mem={:.1f} MB ({:.2f} GB)  avg_mem={:.1f} MB  "
+        "total_wall={:.1f} s  iters={}  speed={:.2f} it/s ({:.4f} s/it)\n"
+        "[Perf] render_wall={:.1f} s  render_images={}  sec_per_image={:.6f} s\n"
+        "[Perf] unique_cams={}  total_cam_renders={}  render_amplification={:.2f}x  "
+        "min={}  p50={}  p90={}  p99={}  max={}\n"
     ).format(
-        _perf_peak_mb, _perf_avg_mb, _perf_elapsed,
-        _perf_iters_done, _perf_iters_per_sec, _perf_sec_per_iter,
+        _perf_peak_mb, _perf_peak_mb / 1024,
+        _perf_avg_mb,
+        _perf_elapsed, _perf_iters_done,
+        _perf_iters_per_sec, _perf_sec_per_iter,
+        _render_wall_s, _render_images, _sec_per_image,
+        _n_unique_cams, _total_cam_renders, _render_amplification,
+        _min_renders, _p50, _p90, _p99, _max_renders,
     )
     print(_perf_summary, end="")
     log_file.write(_perf_summary)
 
-    # Final Gaussian count summary (local shard and global total).
+    if _camera_render_counts and utils.LOCAL_RANK == 0:
+        import csv as _csv, os as _os
+        _csv_path = _os.path.join(_os.path.dirname(log_file.name) or ".", "cam_render_counts.csv")
+        with open(_csv_path, "w", newline="") as _f:
+            _w = _csv.writer(_f)
+            _w.writerow(["camera", "render_count"])
+            for _name, _c in sorted(_camera_render_counts.items(), key=lambda x: x[1], reverse=True):
+                _w.writerow([_name, _c])
+        log_file.write("[CamRenderCounts] csv={}  n={}\n".format(_csv_path, _n_unique_cams))
+
     _n_final_local = int(gaussians.get_xyz.shape[0])
     _n_final_total = _n_final_local
     if utils.WORLD_SIZE > 1:
@@ -582,7 +725,6 @@ def training_report(iteration, l1_loss, testing_iterations, scene: Scene, pipe_a
                     )
                     
                     for camera_id, (image, gt_camera, render_pkg) in enumerate(zip(batched_image, batched_cameras, batched_return_dict)):
-                        # Ensure reduction inputs are always valid CUDA tensors.
                         h, w = gt_camera.original_image.shape[1], gt_camera.original_image.shape[2]
 
                         def _ensure_cuda_tensor(x, shape):

@@ -47,9 +47,6 @@ def load_cameras_and_create_txt(root, out_dir, index_file, database, scale=1):
     image_ids = []
     image_sizes = []
 
-    # with open(os.path.join(path, transformsfile)) as json_file:
-
-    # c2ws = np.array([frame["transform_matrix"] for frame in frames])
 
     for img_fname in tqdm(image_fnames):
         img = Image.open(os.path.join(root, 'rgbs', img_fname))        
@@ -57,7 +54,6 @@ def load_cameras_and_create_txt(root, out_dir, index_file, database, scale=1):
         image_sizes.append((w, h))
         findex = img_fname.split('.')[0]
         metadata = torch.load(os.path.join(root, 'metadata', f'{findex}.pt'))
-        # add camera
         fx, fy, cx, cy = metadata['intrinsics']
         if isinstance(fx, torch.Tensor):
             fx = fx.item()
@@ -68,25 +64,16 @@ def load_cameras_and_create_txt(root, out_dir, index_file, database, scale=1):
         if isinstance(fy, torch.Tensor):
             cy = cy.item()
         camera_id = database.add_camera(1, w, h, (fx, fy, cx, cy))
-        # add image
         c2w = metadata['c2w'].reshape(3, 4)
-        # inverse transform of https://github.com/cmusatyalab/mega-nerf/blob/main/scripts/colmap_to_mega_nerf.py#L409
         c2w = torch.cat([-c2w[:, 1:2], c2w[:, :1], c2w[:, 2:]], 1)
-        # inverse transform of https://github.com/cmusatyalab/mega-nerf/blob/main/scripts/colmap_to_mega_nerf.py#L346-L349  #把mega-nerf反过来了
         c2w = torch.cat([RDF_TO_DRB.inverse() @ c2w[:3, :3] @ RDF_TO_DRB,
                          RDF_TO_DRB.inverse() @ c2w[:3, 3:]], -1)
 
-        # camera-to-world to world-to-camera
         R = c2w[:3, :3].T
         t = - R @ c2w[:3, -1:]
-        # world-to-camera do not need change anymore  #Blendmvs
-        # R = c2w[:3, :3]
-        # t = c2w[:3, -1:]
 
         Rs.append(R)
         Ts.append(t)
-        # w2c = (torch.cat([c2w, torch.eye(4)[-1:]])).inverse()[:3, :4]
-        # qx, qy, qz, qw = rot_mat_to_quaternion(R.cpu().numpy())
         q = rotmat2qvec(R.cpu().numpy())
         t = t[:, -1].tolist()
         print(img_fname)
@@ -106,7 +93,6 @@ def load_cameras_and_create_txt(root, out_dir, index_file, database, scale=1):
     np.savetxt(os.path.join(out_dir, 'images.txt'), np.array(image_txts, dtype=str), fmt="%s")
     np.savetxt(os.path.join(out_dir, 'cameras.txt'), np.array(camera_txts, dtype=str), fmt="%s")
     np.savetxt(os.path.join(out_dir, 'tvec_priors.txt'), np.array(tvec_prior_txts, dtype=str), fmt="%s")
-    # make an empty file
     f = open(os.path.join(out_dir, 'points3D.txt'), 'w')
     f.close()
 

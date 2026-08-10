@@ -244,15 +244,12 @@ def example_usage():
         print("ERROR: database path already exists -- will not modify it.")
         return
 
-    # Open the database.
 
     db = COLMAPDatabase.connect(args.database_path)
 
-    # For convenience, try creating all the tables upfront.
 
     db.create_tables()
 
-    # Create dummy cameras.
 
     model1, width1, height1, params1 = \
         0, 1024, 768, np.array((1024., 512., 384.))
@@ -262,19 +259,12 @@ def example_usage():
     camera_id1 = db.add_camera(model1, width1, height1, params1)
     camera_id2 = db.add_camera(model2, width2, height2, params2)
 
-    # Create dummy images.
 
     image_id1 = db.add_image("image1.png", camera_id1)
     image_id2 = db.add_image("image2.png", camera_id1)
     image_id3 = db.add_image("image3.png", camera_id2)
     image_id4 = db.add_image("image4.png", camera_id2)
 
-    # Create dummy keypoints.
-    #
-    # Note that COLMAP supports:
-    #      - 2D keypoints: (x, y)
-    #      - 4D keypoints: (x, y, theta, scale)
-    #      - 6D affine keypoints: (x, y, a_11, a_12, a_21, a_22)
 
     num_keypoints = 1000
     keypoints1 = np.random.rand(num_keypoints, 2) * (width1, height1)
@@ -287,7 +277,6 @@ def example_usage():
     db.add_keypoints(image_id3, keypoints3)
     db.add_keypoints(image_id4, keypoints4)
 
-    # Create dummy matches.
 
     M = 50
     matches12 = np.random.randint(num_keypoints, size=(M, 2))
@@ -298,11 +287,9 @@ def example_usage():
     db.add_matches(image_id2, image_id3, matches23)
     db.add_matches(image_id3, image_id4, matches34)
 
-    # Commit the data to the file.
 
     db.commit()
 
-    # Read and check cameras.
 
     rows = db.execute("SELECT * FROM cameras")
 
@@ -318,7 +305,6 @@ def example_usage():
     assert model == model2 and width == width2 and height == height2
     assert np.allclose(params, params2)
 
-    # Read and check keypoints.
 
     keypoints = dict(
         (image_id, blob_to_array(data, np.float32, (-1, 2)))
@@ -330,7 +316,6 @@ def example_usage():
     assert np.allclose(keypoints[image_id3], keypoints3)
     assert np.allclose(keypoints[image_id4], keypoints4)
 
-    # Read and check matches.
 
     pair_ids = [image_ids_to_pair_id(*pair) for pair in
                 ((image_id1, image_id2),
@@ -347,7 +332,6 @@ def example_usage():
     assert np.all(matches[(image_id2, image_id3)] == matches23)
     assert np.all(matches[(image_id3, image_id4)] == matches34)
 
-    # Clean up.
 
     db.close()
 

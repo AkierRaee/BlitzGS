@@ -26,8 +26,6 @@ def all_to_all_communication_final(
     batched_strategies,
 ):
     num_cameras = len(batched_rasterizers)
-    # gpui_to_gpuj_camk_size
-    # gpui_to_gpuj_camk_send_ids
 
     local_to_gpuj_camk_size = [[] for j in range(utils.DEFAULT_GROUP.size())]  
     local_to_gpuj_camk_send_ids = [[] for j in range(utils.DEFAULT_GROUP.size())] 
@@ -40,7 +38,7 @@ def all_to_all_communication_final(
 
         for local_id, global_id in enumerate(strategy.gpu_ids):
             local_to_gpuj_camk_size[global_id].append(len(local2j_ids[local_id]))
-            local_to_gpuj_camk_send_ids[global_id].append(local2j_ids[local_id]) #
+            local_to_gpuj_camk_send_ids[global_id].append(local2j_ids[local_id])
 
         for j in range(utils.DEFAULT_GROUP.size()):
             if len(local_to_gpuj_camk_size[j]) == k:
@@ -59,7 +57,7 @@ def all_to_all_communication_final(
     )
     torch.distributed.all_gather_into_tensor(
         gpui_to_gpuj_imgk_size,
-        local_to_gpuj_camk_size_tensor,  #
+        local_to_gpuj_camk_size_tensor,
         group=utils.DEFAULT_GROUP,
     )
     gpui_to_gpuj_imgk_size = gpui_to_gpuj_imgk_size.cpu().numpy().tolist()
@@ -72,9 +70,8 @@ def all_to_all_communication_final(
             tensor_from_rki_size = 0
             for k in range(num_cameras):
                 tensor_to_rki_list.append(
-                    batched_tensors[k][local_to_gpuj_camk_send_ids[i][k]]  #
+                    batched_tensors[k][local_to_gpuj_camk_send_ids[i][k]]
                 )
-                #
                 tensor_from_rki_size += gpui_to_gpuj_imgk_size[i][
                     utils.DEFAULT_GROUP.rank()
                 ][k]
@@ -85,7 +82,7 @@ def all_to_all_communication_final(
                     dtype=batched_tensors[0].dtype,
                     device="cuda",
                 )
-            )#
+            )
         if (
             use_function_version
         ):  
@@ -93,7 +90,7 @@ def all_to_all_communication_final(
                 output_tensor_list=tensor_from_rki,
                 input_tensor_list=tensor_to_rki,
                 group=utils.DEFAULT_GROUP,
-            )  # The function version could naturally enable communication during backward.
+            )
         else:
             torch.distributed.all_to_all(
                 output_tensor_list=tensor_from_rki,
@@ -101,9 +98,7 @@ def all_to_all_communication_final(
                 group=utils.DEFAULT_GROUP,
             )
 
-        # tensor_from_rki: (world_size, (all data received from all other GPUs))
         for i in range(utils.DEFAULT_GROUP.size()):
-            # -> (world_size, num_cameras, *)
             tensor_from_rki[i] = tensor_from_rki[i].split(
                 gpui_to_gpuj_imgk_size[i][utils.DEFAULT_GROUP.rank()], dim=0
             )
@@ -119,14 +114,12 @@ def all_to_all_communication_final(
 
         return tensors_per_camera
 
-    # Merge means2D, rgb, conic_opacity into one functional all-to-all communication call.
     batched_catted_screenspace_states = []
     batched_catted_screenspace_auxiliary_states = []
     
     for k in range(num_cameras):
         means2D, rgb, conic_opacity, radii, depths, means3D, scales, rotation = batched_screenspace_params[k]
 
-        # Keep communication tensors 2D for stable downstream CUDA contracts.
         if rgb.dim() > 2:
             rgb = rgb.contiguous().view(rgb.shape[0], -1)
 
@@ -226,7 +219,7 @@ def get_cuda_args_final(strategy, mode="train"):
 
 def distributed_preprocess3dgs_and_all2all_final(
     batched_viewpoint_cameras,
-    pc,  # standard GaussianModel
+    pc,
     pipe,
     bg_color: torch.Tensor,
     scaling_modifier=1.0,
@@ -286,7 +279,7 @@ def distributed_preprocess3dgs_and_all2all_final(
             assert viewpoint_camera.uid < pc._culling_num_views, (
                 f"camera uid {viewpoint_camera.uid} out of range "
                 f"for _culling_num_views={pc._culling_num_views}")
-            view_cull = pc._get_culling_view(viewpoint_camera.uid)  # bool [N_full]
+            view_cull = pc._get_culling_view(viewpoint_camera.uid)
             if lod_indices is None:
                 lod_indices = (~view_cull).nonzero(as_tuple=False).squeeze(1)
             else:
@@ -307,7 +300,7 @@ def distributed_preprocess3dgs_and_all2all_final(
         batched_opacity.append(opacity_cam)
         batched_scales.append(scaling_cam)
         batched_rotations.append(rot_cam)
-        batched_neural_opacity.append(None) # Padded for compatibility with downstream dict unpacking
+        batched_neural_opacity.append(None)
         batched_mask.append(None)
 
         cuda_args = get_cuda_args_final(strategy, mode)
@@ -379,7 +372,7 @@ def distributed_preprocess3dgs_and_all2all_final(
             _full_r = torch.zeros(n_total, dtype=_r.dtype, device=_r.device)
             _full_r[_lod] = _r
             _full_m2d = torch.zeros(n_total, *_m2d.shape[1:], dtype=_m2d.dtype, device=_m2d.device)
-            _full_m2d[_lod] = _m2d.detach()  # detach: grad tracked via original filtered tensor
+            _full_m2d[_lod] = _m2d.detach()
             full_radii_list.append(_full_r)
             full_means2D_list.append(_full_m2d)
         else:
@@ -387,13 +380,13 @@ def distributed_preprocess3dgs_and_all2all_final(
             full_means2D_list.append(_m2d)
 
     batched_screenspace_pkg = {
-        "batched_locally_preprocessed_mean2D": batched_means2D,  # original (grad-enabled)
+        "batched_locally_preprocessed_mean2D": batched_means2D,
         "batched_locally_preprocessed_visibility_filter": [r > 0 for r in full_radii_list],
         "batched_locally_preprocessed_radii": full_radii_list,
-        "batched_locally_opacity": batched_neural_opacity, # Now Nones, won't break dictionary extraction
-        "batched_locally_offset_mask": batched_mask,       # Now Nones
+        "batched_locally_opacity": batched_neural_opacity,
+        "batched_locally_offset_mask": batched_mask,
         "batched_locally_voxel_mask": batched_voxel_mask,
-        "batched_lod_masks": batched_lod_masks,            # Per-camera LOD index tensors (None when LOD inactive)
+        "batched_lod_masks": batched_lod_masks,
         "batched_rasterizers": batched_rasterizers,
         "batched_cuda_args": batched_cuda_args,
         "batched_cuda_args_test": batched_cuda_args_test,
@@ -426,7 +419,6 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     Background tensor (bg_color) must be on GPU!
     """
  
-    # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
     from diff_gaussian_rasterization_r import GaussianRasterizationSettings, GaussianRasterizer
     screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda") + 0
     try:
@@ -434,7 +426,6 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     except:
         pass
 
-    # Set up rasterization configuration
     tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
     tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
 
@@ -459,8 +450,6 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     means2D = screenspace_points
     opacity = pc.get_opacity
 
-    # If precomputed 3d covariance is provided, use it. If not, then it will be computed from
-    # scaling / rotation by the rasterizer.
     scales = None
     rotations = None
     cov3D_precomp = None
@@ -470,8 +459,6 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         scales = pc.get_scaling
         rotations = pc.get_rotation
 
-    # If precomputed colors are provided, use them. Otherwise, if it is desired to precompute colors
-    # from SHs in Python, do it. If not, then SH -> RGB conversion will be done by rasterizer.
     shs = None
     colors_precomp = None
     if override_color is None:
@@ -486,7 +473,6 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     else:
         colors_precomp = override_color
 
-    # Rasterize visible Gaussians to image, obtain their radii (on screen). 
     rendered_image, radii = rasterizer(
         means3D = means3D,
         means2D = means2D,
@@ -497,8 +483,6 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         rotations = rotations,
         cov3D_precomp = cov3D_precomp)
 
-    # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
-    # They will be excluded from value updates used in the splitting criteria.
     return {"render": rendered_image,
             "viewspace_points": screenspace_points,
             "visibility_filter" : radii > 0,
@@ -512,7 +496,6 @@ def render_imp(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tens
     Background tensor (bg_color) must be on GPU!
     """
  
-    # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
     from diff_gaussian_rasterization_f import GaussianRasterizationSettings, GaussianRasterizer
     screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda") + 0
     try:
@@ -520,7 +503,6 @@ def render_imp(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tens
     except:
         pass
 
-    # Set up rasterization configuration
     tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
     tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
 
@@ -545,8 +527,6 @@ def render_imp(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tens
     means2D = screenspace_points
     opacity = pc.get_opacity
 
-    # If precomputed 3d covariance is provided, use it. If not, then it will be computed from
-    # scaling / rotation by the rasterizer.
     scales = None
     rotations = None
     cov3D_precomp = None
@@ -556,8 +536,6 @@ def render_imp(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tens
         scales = pc.get_scaling
         rotations = pc.get_rotation
 
-    # If precomputed colors are provided, use them. Otherwise, if it is desired to precompute colors
-    # from SHs in Python, do it. If not, then SH -> RGB conversion will be done by rasterizer.
     shs = None
     colors_precomp = None
     if override_color is None:
@@ -575,7 +553,6 @@ def render_imp(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tens
     if culling==None:
         culling=torch.zeros(means3D.shape[0], dtype=torch.bool, device='cuda')
 
-    # Rasterize visible Gaussians to image, obtain their radii (on screen). 
     rendered_image, radii, accum_max_count  = rasterizer(
         means3D = means3D,
         means2D = means2D,
@@ -589,8 +566,6 @@ def render_imp(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tens
         cov3D_precomp = cov3D_precomp,
         flag_max_count=flag_max_count)
 
-    # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
-    # They will be excluded from value updates used in the splitting criteria.
     return {"render": rendered_image,
             "viewspace_points": screenspace_points,
             "visibility_filter" : (radii > 0).nonzero(),
@@ -606,7 +581,6 @@ def render_simp(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Ten
     Background tensor (bg_color) must be on GPU!
     """
  
-    # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
     from diff_gaussian_rasterization_f import GaussianRasterizationSettings, GaussianRasterizer
     screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda") + 0
     try:
@@ -614,7 +588,6 @@ def render_simp(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Ten
     except:
         pass
 
-    # Set up rasterization configuration
     tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
     tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
 
@@ -639,8 +612,6 @@ def render_simp(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Ten
     means2D = screenspace_points
     opacity = pc.get_opacity
 
-    # If precomputed 3d covariance is provided, use it. If not, then it will be computed from
-    # scaling / rotation by the rasterizer.
     scales = None
     rotations = None
     cov3D_precomp = None
@@ -650,8 +621,6 @@ def render_simp(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Ten
         scales = pc.get_scaling
         rotations = pc.get_rotation
 
-    # If precomputed colors are provided, use them. Otherwise, if it is desired to precompute colors
-    # from SHs in Python, do it. If not, then SH -> RGB conversion will be done by rasterizer.
     shs = None
     colors_precomp = None
     if override_color is None:
@@ -669,7 +638,6 @@ def render_simp(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Ten
     if culling==None:
         culling=torch.zeros(means3D.shape[0], dtype=torch.bool, device='cuda')
 
-    # Rasterize visible Gaussians to image, obtain their radii (on screen). 
     rendered_image, radii, \
     accum_weights_ptr, accum_weights_count, accum_max_count  = rasterizer.render_simp(
         means3D = means3D,
@@ -683,8 +651,6 @@ def render_simp(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Ten
         rotations = rotations,
         cov3D_precomp = cov3D_precomp)
 
-    # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
-    # They will be excluded from value updates used in the splitting criteria.
     return {"render": rendered_image,
             "viewspace_points": screenspace_points,
             "visibility_filter" : (radii > 0).nonzero(),
@@ -693,7 +659,6 @@ def render_simp(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Ten
             "area_proj": accum_weights_count,
             "area_max": accum_max_count,
             }
-
 
 
 def render_final(batched_cameras, batched_screenspace_pkg, batched_strategies,  tile_size=16 , batched_cameras_nearest =None, rasterizer_nearest = None):
@@ -766,7 +731,6 @@ def render_final(batched_cameras, batched_screenspace_pkg, batched_strategies,  
             batched_return_dict_nearest.append(None)
             continue
 
-        # get compute_locally to know local workload in the end2end distributed training.
         if timers is not None:
             timers.start("forward_compute_locally")
         compute_locally = strategy.get_compute_locally()
@@ -808,7 +772,6 @@ def render_final(batched_cameras, batched_screenspace_pkg, batched_strategies,  
             f"cam={cam_id}",
         )
         if means2D_redistributed.shape[0] < 10:
-            # That means we do not have enough gaussians locally for rendering, that mainly happens because of insufficient initial points.
             rendered_image = (
                 means2D_redistributed.sum()
                 + conic_opacity_redistributed.sum()
@@ -836,14 +799,12 @@ def render_final(batched_cameras, batched_screenspace_pkg, batched_strategies,  
         else:
             nearest_render_pkg = None
             input_all_map = torch.zeros((means2D_redistributed.shape[0], 5)).cuda().float()
-            # render
             if timers is not None:
                 timers.start("forward_render_gaussians")
 
             screenspace_points_abs = torch.zeros_like(xyz_redistributed, dtype=means2D_redistributed.dtype, requires_grad=True, device="cuda") + 0
             try:
                 screenspace_points_abs.retain_grad()
-                # screenspace_points_abs.retain_grad()
             except:
                 pass
             means2D_abs = screenspace_points_abs
@@ -890,5 +851,4 @@ def render_final(batched_cameras, batched_screenspace_pkg, batched_strategies,  
             timers.stop("forward_render_gaussians")
     utils.check_initial_gpu_memory_usage("after forward_render_gaussians")
 
-    ########## [END] CUDA Rasterization Call ##########
     return batched_rendered_image, batched_compute_locally, batched_out_all_map, batched_out_observe, batched_out_plane_depth, batched_return_dict, batched_return_dict_nearest

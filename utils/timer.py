@@ -8,7 +8,6 @@ class Timer:
         self.timers = {}
         self.args = args
         if args.enable_timer:
-            # Enable time measure evaluated on python side.
             self.file = open(
                 args.log_folder
                 + "/python_time_ws="
@@ -53,7 +52,7 @@ class Timer:
 
     def printTimers(
         self, iteration, mode="this_iteration"
-    ):  # this_iteration, average, sum
+    ):
         """Get the elapsed time for the given key without stopping the timer"""
         if not utils.check_enable_python_timer():
             return
@@ -65,7 +64,6 @@ class Timer:
 
         for key in self.timers:
             if mode == "this_iteration":
-                # print(f"iter {iteration}, TimeFor '{key}': {self.timers[key]['all_time'][-1]*1000:.6f} ms")
                 self.file.write(
                     f"iter {iteration}, TimeFor '{key}': {self.timers[key]['all_time'][-1]*1000:.6f} ms\n"
                 )
@@ -73,7 +71,6 @@ class Timer:
                 average_time = (
                     sum(self.timers[key]["all_time"]) / self.timers[key]["cnt"]
                 )
-                # print(f"iter {iteration}, AverageTimeFor '{key}': {average_time*1000:.6f} ms")
                 self.file.write(
                     f"iter {iteration}, AverageTimeFor '{key}': {average_time*1000:.6f} ms\n"
                 )

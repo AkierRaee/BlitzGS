@@ -27,8 +27,6 @@ import cv2
 import os
 
 
-
-
 WARNED = False
 
 def _get_resolution(orig_w, orig_h, resolution):
@@ -52,14 +50,10 @@ def pix2ndc(v, S):
 
 def loadCam(args, id, cam_info, decompressed_image=None, return_image=False, depth_reliables = None, invdepthmaps = None , normal_mask = None, noraml_gt = None, depth_mask = None, resized_image_gray = None):
     orig_w, orig_h = cam_info.width, cam_info.height
-    # assert (
-    #     orig_w // args.resolution == utils.get_img_width() and orig_h // args.resolution == utils.get_img_height()
-    # ), "All images should have the same size. "
 
     args = get_args()
     log_file = get_log_file()
     resolution = _get_resolution(orig_w, orig_h, args.resolution)
-    # may use cam_info.uid
     if (
         (
             args.local_sampling
@@ -76,18 +70,15 @@ def loadCam(args, id, cam_info, decompressed_image=None, return_image=False, dep
         if args.time_image_loading:
             start_time = time.time()
         image = Image.open(cam_info.image_path)
-        # resized_image_gray = image .convert('L')
         resized_image_rgb = PILtoTorch(
             image, resolution, args, log_file, decompressed_image=decompressed_image
         )
         if args.time_image_loading:
             log_file.write(f"PILtoTorch image in {time.time() - start_time} seconds\n")
 
-        # assert resized_image_rgb.shape[0] == 3, "Image should have exactly 3 channels!"
         gt_image = resized_image_rgb[:3, ...].contiguous()
         loaded_mask = None
 
-        # Free the memory: because the PIL image has been converted to torch tensor, we don't need it anymore. And it takes up lots of cpu memory.
         image.close()
         image = None
         if return_image: 
@@ -125,8 +116,6 @@ def loadCam(args, id, cam_info, decompressed_image=None, return_image=False, dep
         normal_mask = None
         resized_image_gray =None
 
-        # invdepthmap[mask.unsqueeze(0)] = 0
-        # mask = None
     if return_image:
         return gt_image, depth_reliable, invdepthmap, mask, noraml_gt, normal_mask, resized_image_gray
 
@@ -158,7 +147,6 @@ def load_decompressed_image(params):
     return loadCam(args, id, cam_info, decompressed_image=None, return_image=True)
 
 
-# Modify this code to support shared_memory.SharedMemory to make inter-process communication faster
 def decompressed_images_from_camInfos_multiprocess(cam_infos, args):
     args = get_args()
     decompressed_images = []
@@ -170,13 +158,9 @@ def decompressed_images_from_camInfos_multiprocess(cam_infos, args):
     resized_image_gray = []
     total_cameras = len(cam_infos)
 
-    # Create a pool of processes
     with multiprocessing.Pool(processes=24) as pool:
-        # Prepare data for processing
         tasks = [(args, id, cam_info) for id, cam_info in enumerate(cam_infos)]
 
-        # Map load_camera_data to the tasks
-        # results = pool.map(load_decompressed_image, tasks)
         results = list(
             tqdm(
                 pool.imap(load_decompressed_image, tasks),
@@ -184,7 +168,6 @@ def decompressed_images_from_camInfos_multiprocess(cam_infos, args):
                 disable=(utils.LOCAL_RANK != 0),
             )
         )
-        # print(len(results))
         for id, result in enumerate(results):
             decompressed_images.append(result[0])
             depth_reliables.append(result[1])
@@ -195,7 +178,6 @@ def decompressed_images_from_camInfos_multiprocess(cam_infos, args):
             resized_image_gray.append(result[6])
 
     return decompressed_images, depth_reliables, invdepthmaps, depth_mask, noramls_gt, normal_masks, resized_image_gray
-
 
 
 def decompressed_images_from_camInfos_multiprocess_single_gpu(cam_infos, args):
@@ -209,13 +191,8 @@ def decompressed_images_from_camInfos_multiprocess_single_gpu(cam_infos, args):
     resized_image_gray = []
     total_cameras = len(cam_infos)
 
-    # Create a pool of processes
-    # with multiprocessing.Pool(processes=24) as pool:
-        # Prepare data for processing
     tasks = [(args, id, cam_info) for id, cam_info in enumerate(cam_infos)]
 
-    # Map load_camera_data to the tasks
-    # results = pool.map(load_decompressed_image, tasks)
     for task in tqdm(tasks, total=total_cameras):
         result = load_decompressed_image(task)
         decompressed_images.append(result[0])
@@ -232,12 +209,10 @@ def decompressed_images_from_camInfos_multiprocess_single_gpu(cam_infos, args):
 
 def decompress_and_scale_image(cam_info):
     pil_image = cam_info.image
-    resolution = cam_info.image.size  # (w, h)
-    # print("cam_info.image.size: ", cam_info.image.size)
+    resolution = cam_info.image.size
     pil_image.load()
     resized_image_PIL = pil_image.resize(resolution)
-    resized_image = np.array(resized_image_PIL)  # (h, w, 3)
-    # print("resized_image.shape: ", resized_image.shape)
+    resized_image = np.array(resized_image_PIL)
     if len(resized_image.shape) == 3:
         return resized_image.transpose(2, 0, 1)
     else:
@@ -246,26 +221,20 @@ def decompress_and_scale_image(cam_info):
 
 def load_decompressed_image_shared(params):
     shared_mem_name, args, id, cam_info, resolution_scale = params
-    # Retrieve the shared memory block
     existing_shm = shared_memory.SharedMemory(name=shared_mem_name)
 
-    # Assume each image will be stored as a flat array in shared memory
-    # Example: using numpy for manipulation; adjust size and dtype as needed
     resolution_width, resolution_height = cam_info.image.size
-    image_shape = (3, resolution_height, resolution_width)  # Set appropriate values
-    dtype = np.uint8  # Adjust as per your image data type
+    image_shape = (3, resolution_height, resolution_width)
+    dtype = np.uint8
 
-    # Calculate the offset for this particular image
     offset = id * np.prod(image_shape)
     np_image_array = np.ndarray(
         image_shape, dtype=dtype, buffer=existing_shm.buf, offset=offset
     )
 
-    # Decompress image into the numpy array directly
-    decompressed_image = decompress_and_scale_image(cam_info)  # Implement this
+    decompressed_image = decompress_and_scale_image(cam_info)
     np_image_array[:] = decompressed_image
 
-    # Clean up
     existing_shm.close()
 
 
@@ -276,23 +245,19 @@ def decompressed_images_from_camInfos_multiprocess_sharedmem(
     decompressed_images = []
     total_cameras = len(cam_infos)
 
-    # Assume each image shape and dtype
     resolution_width, resolution_height = cam_infos[0].image.size
     image_shape = (
         3,
         resolution_height,
         resolution_width,
-    )  # Define these as per your data
+    )
     dtype = np.uint8
     image_size = np.prod(image_shape) * np.dtype(dtype).itemsize
 
-    # Create shared memory
     total_size = image_size * total_cameras
     shm = shared_memory.SharedMemory(create=True, size=total_size)
 
-    # Create a pool of processes
     with multiprocessing.Pool(64) as pool:
-        # Prepare data for processing
         tasks = [
             (shm.name, args, id, cam_info, resolution_scale)
             for id, cam_info in enumerate(cam_infos)
@@ -302,7 +267,6 @@ def decompressed_images_from_camInfos_multiprocess_sharedmem(
             tqdm(pool.imap(load_decompressed_image_shared, tasks), total=total_cameras)
         )
 
-    # Read images from shared memory
     decompressed_images = []
     for id in range(total_cameras):
         offset = id * np.prod(image_shape)
@@ -311,15 +275,12 @@ def decompressed_images_from_camInfos_multiprocess_sharedmem(
         )
         decompressed_images.append(
             torch.from_numpy(np_image_array)
-        )  # Make a copy if necessary
+        )
 
-    # Clean up shared memory
     shm.close()
     shm.unlink()
 
     return decompressed_images
-
-
 
 
 def set_rays_od(cams):
@@ -329,17 +290,16 @@ def set_rays_od(cams):
             projectinverse = cam.projection_matrix.T.inverse()
             camera2wold = cam.world_view_transform.T.inverse()
             pixgrid = create_meshgrid(cam.image_height, cam.image_width, normalized_coordinates=False, device="cpu")[0]
-            pixgrid = pixgrid.cuda()  # H,W,
-            xindx = pixgrid[:,:,0] # x
-            yindx = pixgrid[:,:,1] # y
+            pixgrid = pixgrid.cuda()
+            xindx = pixgrid[:,:,0]
+            yindx = pixgrid[:,:,1]
             ndcy, ndcx = pix2ndc(yindx, cam.image_height), pix2ndc(xindx, cam.image_width)
             ndcx = ndcx.unsqueeze(-1)
-            ndcy = ndcy.unsqueeze(-1)# * (-1.0)
-            ndccamera = torch.cat((ndcx, ndcy,   torch.ones_like(ndcy) * (1.0) , torch.ones_like(ndcy)), 2) # N,4
+            ndcy = ndcy.unsqueeze(-1)
+            ndccamera = torch.cat((ndcx, ndcy,   torch.ones_like(ndcy) * (1.0) , torch.ones_like(ndcy)), 2)
             projected = ndccamera @ projectinverse.T
-            diretioninlocal = projected / projected[:,:,3:] #v
+            diretioninlocal = projected / projected[:,:,3:]
             direction = diretioninlocal[:,:,:3] @ camera2wold[:3,:3].T
-            # rays_d = torch.nn.functional.normalize(direction, p=2.0, dim=-1)
             rays_d = direction
             rays_d = rays_d / torch.norm(rays_d, dim=-1, keepdim=True)
             cam.rayo = cam.camera_center.expand(rays_d.shape).permute(2, 0, 1).unsqueeze(0).cpu()
@@ -349,11 +309,6 @@ def set_rays_od(cams):
             cam.rayd = None
 
 
-
-
-
-
-
 def cameraList_from_camInfos(cam_infos, args):
     args = get_args()
 
@@ -361,7 +316,6 @@ def cameraList_from_camInfos(cam_infos, args):
         decompressed_images, depth_reliables, invdepthmaps,  depth_masks, noramls_gt, normal_masks, resized_image_gray = decompressed_images_from_camInfos_multiprocess(
             cam_infos, args
         )
-        # decompressed_images = decompressed_images_from_camInfos_multiprocess_sharedmem(cam_infos, resolution_scale, args)
     else:
         decompressed_images, depth_reliables, invdepthmaps,  depth_masks, noramls_gt, normal_masks, resized_image_gray = decompressed_images_from_camInfos_multiprocess_single_gpu(
             cam_infos, args

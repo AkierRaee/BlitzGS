@@ -5,20 +5,14 @@ import time
 import utils.general_utils as utils
 import diff_gaussian_rasterization_f
 
-########################## Utility Functions ##########################
-
 
 def strategy_str_to_interval(strategy_str):
-    # strategy_str: `T:$l,$r`
-    # return: (l, r)
-    # print(strategy_str)
     l = int(strategy_str.split(":")[1].split(",")[0])
     r = int(strategy_str.split(":")[1].split(",")[1])
     return (l, r)
 
 
 def interval_to_strategy_str(interval):
-    # print(interval)
     return f"T:{interval[0]},{interval[1]}"
 
 
@@ -38,8 +32,6 @@ def get_tile_pixel_cnt(j, i, image_width, image_height):
 
 
 def division_pos_to_global_strategy_str(division_pos):
-    # division_pos: [0, d1, d2, ..., tile_num]
-    # return: "0,100,200,300,400,500,600,700,800,900,1000"
     return ",".join(map(str, division_pos))
 
 
@@ -48,7 +40,6 @@ def get_evenly_division_pos(camera):
     tile_y = (camera.image_height + utils.BLOCK_Y - 1) // utils.BLOCK_Y
     tile_num = tile_x * tile_y
 
-    # return division_pos # format:[0, d1, d2, ..., tile_num]
     if tile_num % utils.MP_GROUP.size() == 0:
         cnt = tile_num // utils.MP_GROUP.size()
     else:
@@ -83,12 +74,9 @@ def division_pos_heuristic(heuristic, tile_num, world_size, right=False):
     thresholds = torch.arange(1, world_size, device="cuda") * heuristic_per_worker
     division_pos = [0]
 
-    # Use searchsorted to find the positions
     division_indices = torch.searchsorted(heuristic_prefix_sum, thresholds, right=right)
 
-    # check_division_indices_globally_same(division_indices)
 
-    # Convert to a Python list and prepend the initial division at 0.
     division_pos = [0] + division_indices.cpu().tolist() + [tile_num]
 
     return division_pos
@@ -102,7 +90,6 @@ def get_local_running_time_by_modes(stats_collector):
     return local_running_time
 
 
-########################## DivisionStrategy ##########################
 class DivisionStrategy:
 
     def __init__(
@@ -175,7 +162,6 @@ class DivisionStrategy:
 
         local2j_ids = []
         for rk in range(self.world_size):
-            # Keep indices 1D so tensor indexing does not inject an extra axis.
             local2j_ids.append(local2j_ids_bool[:, rk].nonzero(as_tuple=True)[0])
 
         return local2j_ids, local2j_ids_bool
@@ -189,7 +175,6 @@ class DivisionStrategy:
         return division_pos_to_global_strategy_str(self.division_pos)
 
     def to_json(self):
-        # convert to json format
         data = {}
         data["gloabl_strategy_str"] = self.get_global_strategy_str()
         data["local_strategy"] = (
@@ -230,7 +215,6 @@ class DivisionStrategyUniform(DivisionStrategy):
         return False
 
     def to_json(self):
-        # convert to json format
         data = {}
         data["global_strategy_str"] = self.get_global_strategy_str()
         data["local_strategy"] = (
@@ -305,7 +289,6 @@ class DivisionStrategyDynamicAdjustment(DivisionStrategy):
         return False
 
     def to_json(self):
-        # convert to json format
         data = {}
         data["global_strategy_str"] = self.get_global_strategy_str()
         data["local_strategy"] = (
@@ -335,11 +318,6 @@ class DivisionStrategyAsGrid:
         self.tile_x = tile_x
         self.tile_y = tile_y
 
-        # I should fisrt divide the x-axis(images are wide) and then divide the y-axis.
-        # division_pos = (division_pos_ys, division_pos_xs)
-        ## division_pos_xs = [0, ..., tile_x], shape is (self.grid_size_x,)
-        ## division_pos_ys = shape is (self.grid_size_x, self.grid_size_y+1)
-        ## example, suppose we have rank=8, [[0, 8, 16], [0, 9, 16], [0, 6, 16], [0, 12, 16]]
         self.grid_size_y, self.grid_size_x = DivisionStrategyAsGrid.get_grid_size(
             world_size
         )
@@ -376,7 +354,6 @@ class DivisionStrategyAsGrid:
         elif world_size == 8:
             return 2, 4
         elif world_size == 16:
-            #  4, 4
             raise NotImplementedError
         else:
             raise NotImplementedError
@@ -467,7 +444,7 @@ class DivisionStrategyAsGrid:
                 )
         rectangles = torch.tensor(
             rectangles, dtype=torch.int, device=means2D.device
-        )  # (mp_world_size, 4)
+        )
 
         args = (
             raster_settings.image_height,
@@ -482,11 +459,10 @@ class DivisionStrategyAsGrid:
 
         local2j_ids_bool = (
             diff_gaussian_rasterization_f._C.get_local2j_ids_bool_adjust_mode6(*args)
-        )  # local2j_ids_bool is (P, world_size) bool tensor
+        )
 
         local2j_ids = []
         for rk in range(self.world_size):
-            # Keep indices 1D so tensor indexing does not inject an extra axis.
             local2j_ids.append(local2j_ids_bool[:, rk].nonzero(as_tuple=True)[0])
 
         return local2j_ids, local2j_ids_bool
@@ -501,7 +477,6 @@ class DivisionStrategyAsGrid:
         timers.stop("[strategy.update_stats]update_heuristic")
 
     def get_global_strategy_str(self):
-        # we do not change it into string here
         return self.division_pos
 
     def to_json(self):
@@ -566,7 +541,6 @@ name2DivisionStrategy = {
     "DivisionStrategyAsGrid": DivisionStrategyAsGrid,
     "evaluation": DivisionStrategyUniform,
 }
-########################## DivisionStrategyHistory ##########################
 
 
 class DivisionStrategyHistory:
@@ -604,7 +578,6 @@ class DivisionStrategyHistory:
 
         heuristic_decay = args.heuristic_decay
 
-        # update accummulated heuristic
         self.accum_heuristic = (
             self.accum_heuristic * heuristic_decay
             + self.working_strategy.heuristic.view((self.tile_y, self.tile_x))
@@ -621,7 +594,6 @@ class DivisionStrategyHistory:
                     args.image_distribution_unbalance_threshold
                 )
             ):
-                # now, the self.working_strategy is actually the last strategy.
                 heuristic2use = self.current_heuristic
             else:
                 heuristic2use = self.accum_heuristic
@@ -642,9 +614,7 @@ class DivisionStrategyHistory:
     def finish_strategy(self):
         with torch.no_grad():
             self.update_heuristic()
-            # if utils.get_args().benchmark_stats:
             self.working_strategy.heuristic = None
-            # Because the heuristic is of size (# of tiles, ) and takes up lots of memory if we keep it for every iteration.
             self.add(self.working_iteration, self.working_strategy)
 
     def to_json(self):
@@ -656,9 +626,6 @@ class DivisionStrategyHistory:
             }
             json.append(data)
         return json
-
-
-########################## Create DivisionStrategyHistory ##########################
 
 
 def get_division_strategy_history(
@@ -675,7 +642,6 @@ def get_division_strategy_history(
     return cameraId2StrategyHistory[viewpoint_cam.uid]
 
 
-########################## Create DivisionStrategyHistory Final ##########################
 class DivisionStrategyFinal:
 
     def __init__(
@@ -718,7 +684,6 @@ class DivisionStrategyFinal:
             torch.tensor(self.division_pos, dtype=torch.int, device=means2D.device)
             * utils.TILE_X
         )
-        # 对应的image 分块区域
         args = (
             raster_settings.image_height,
             raster_settings.image_width,
@@ -734,11 +699,9 @@ class DivisionStrategyFinal:
 
         local2j_ids = []
         for rk in range(self.world_size):
-            # Keep indices 1D so tensor indexing does not inject an extra axis.
             local2j_ids.append(local2j_ids_bool[:, rk].nonzero(as_tuple=True)[0])
 
         return local2j_ids, local2j_ids_bool
-
 
 
     def get_compute_locally(self):
@@ -762,7 +725,6 @@ class DivisionStrategyFinal:
             return None
         rank = self.gpu_ids.index(utils.GLOBAL_RANK)
 
-        # tile_ids_l, tile_ids_r = self.division_pos[rank]*utils.TILE_X, self.division_pos[rank+1]*utils.TILE_X
         compute_locally = torch.zeros(
             utils.TILE_Y * utils.TILE_X, dtype=torch.bool, device="cuda"
         )
@@ -849,15 +811,14 @@ def start_strategy_final(batched_cameras, strategy_history):
     else:
         batched_accum_heuristic = [
             strategy_history.accum_heuristic[camera.uid] for camera in batched_cameras
-        ]  # batch_size * tile_y
+        ]
         catted_accum_heuristic = torch.cat(
             batched_accum_heuristic, dim=0
-        )  # batch_size * tile_y
+        )
 
         division_pos = division_pos_heuristic(
             catted_accum_heuristic, total_tiles, utils.DEFAULT_GROUP.size(), right=True
         )
-        # slightly adjust the division_pos to avoid redundant kernel launch overheads.
         for i in range(1, len(division_pos) - 1):
             if (
                 division_pos[i] % n_tiles_per_image + args.border_divpos_coeff
@@ -879,7 +840,7 @@ def start_strategy_final(batched_cameras, strategy_history):
         batched_strategies = []
         gpuid2tasks = [
             [] for _ in range(utils.DEFAULT_GROUP.size())
-        ]  # map from gpuid to a list of tasks (camera_id, tile_l, tile_r) it should do.
+        ]
         for idx, camera in enumerate(batched_cameras):
             offset = idx * n_tiles_per_image
 

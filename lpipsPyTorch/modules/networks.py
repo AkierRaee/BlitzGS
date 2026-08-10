@@ -37,7 +37,6 @@ class BaseNet(nn.Module):
     def __init__(self):
         super(BaseNet, self).__init__()
 
-        # register buffer
         self.register_buffer(
             "mean", torch.Tensor([-0.030, -0.088, -0.188])[None, :, None, None]
         )
@@ -92,7 +91,6 @@ class VGG16(BaseNet):
         super(VGG16, self).__init__()
 
         self.layers = models.vgg16(weights=models.VGG16_Weights.IMAGENET1K_V1).features
-        # self.layers = models.vgg16(weights=torch.load("/ailab/user/gaoyuanyuan_p/baseline/vgg16-397923af.pth")).features
         self.target_layers = [4, 9, 16, 23, 30]
         self.n_channels_list = [64, 128, 256, 512, 512]
         self.set_requires_grad(False)

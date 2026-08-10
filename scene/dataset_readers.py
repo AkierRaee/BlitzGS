@@ -85,15 +85,11 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder, depths_para
     args = utils.get_args()
     cam_infos = []
     utils.print_rank_0("Loading cameras from disk...")
-    # idx = 0
     for idx, key in tqdm(
         enumerate(cam_extrinsics),
         total=len(cam_extrinsics),
         disable=(utils.LOCAL_RANK != 0),
     ):
-        # idx = idx + 1
-        # if idx == 11:
-        #     break 
         extr = cam_extrinsics[key]
         intr = cam_intrinsics[extr.camera_id]
         height = intr.height
@@ -113,7 +109,6 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder, depths_para
             FovY = focal2fov(focal_length_y, height)
             FovX = focal2fov(focal_length_x, width)
         elif intr.model == "OPENCV":
-            # we're ignoring the 4 distortion
             focal_length_x = intr.params[0]
             focal_length_y = intr.params[1]
             FovY = focal2fov(focal_length_y, height)
@@ -134,12 +129,11 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder, depths_para
             if os.path.exists(alt_path):
                 image_path = alt_path
             else:
-                # Allow rendering/eval on subsets (e.g. val-only folder) without crashing.
                 continue
         image_name = os.path.basename(image_path).split(".")[0]
         image = Image.open(
             image_path
-        )  # this is a lazy load, the image is not loaded yet
+        )
         width, height = image.size
 
         depth_params = None
@@ -164,7 +158,6 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder, depths_para
             height=height,
         )
 
-        # release memory
         image.close()
         image = None
 
@@ -190,7 +183,6 @@ def fetchPly(path):
 
 
 def storePly(path, xyz, rgb):
-    # Define the dtype for the structured array
     dtype = [
         ("x", "f4"),
         ("y", "f4"),
@@ -209,16 +201,9 @@ def storePly(path, xyz, rgb):
     attributes = np.concatenate((xyz, normals, rgb), axis=1)
     elements[:] = list(map(tuple, attributes))
 
-    # Create the PlyData object and write to file
     vertex_element = PlyElement.describe(elements, "vertex")
     ply_data = PlyData([vertex_element])
     ply_data.write(path)
-
-
-
-
-
-
 
 
 def readColmapSceneInfo_martix(path, images, eval, llffhold=97):
@@ -254,7 +239,6 @@ def readColmapSceneInfo_martix(path, images, eval, llffhold=97):
         except Exception as e:
             print(f"An unexpected error occurred when trying to open depth_params.json file: {e}")
             sys.exit(1)
-
 
 
     cam_infos_unsorted = readColmapCameras(
@@ -311,7 +295,6 @@ def readColmapSceneInfo_martix(path, images, eval, llffhold=97):
     return scene_info
 
 
-
 def readColmapSceneInfo(path, images, eval, llffhold=97):
     try:
         cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.bin")
@@ -347,7 +330,6 @@ def readColmapSceneInfo(path, images, eval, llffhold=97):
             sys.exit(1)
 
 
-
     cam_infos_unsorted = readColmapCameras(
         cam_extrinsics=cam_extrinsics,
         cam_intrinsics=cam_intrinsics,
@@ -366,10 +348,14 @@ def readColmapSceneInfo(path, images, eval, llffhold=97):
         train_cam_infos = [c for idx, c in enumerate(cam_infos)]
         test_cam_infos = [c for idx, c in enumerate(cam_infos)]
     else:
-        # train_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold != 0]
-        # test_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold == 0]
-        train_cam_infos = [c for idx, c in enumerate(cam_infos) if not os.path.exists(c.image_path.replace('train/', 'val/'))]
-        test_cam_infos  = [c for idx, c in enumerate(cam_infos) if os.path.exists(c.image_path.replace('train/', 'val/'))]
+        val_dir = os.path.join(path, "val", "rgbs")
+        if os.path.isdir(val_dir):
+            val_stems = {os.path.splitext(f)[0] for f in os.listdir(val_dir)}
+            train_cam_infos = [c for c in cam_infos if c.image_name not in val_stems]
+            test_cam_infos  = [c for c in cam_infos if c.image_name in val_stems]
+        else:
+            train_cam_infos = [c for c in cam_infos if not os.path.exists(c.image_path.replace('train/', 'val/'))]
+            test_cam_infos  = [c for c in cam_infos if os.path.exists(c.image_path.replace('train/', 'val/'))]
         
     nerf_normalization = getNerfppNorm(train_cam_infos)
 
@@ -426,7 +412,6 @@ def readCamerasFromTransformsCity(
             fovx = None
 
         frames = contents["frames"]
-        # check if filename already contain postfix
         if frames[0]["file_path"].split(".")[-1] in ["jpg", "jpeg", "JPG", "png"]:
             extension = ""
 
@@ -440,7 +425,6 @@ def readCamerasFromTransformsCity(
 
         for idx, frame in enumerate(frames):
             cam_name = os.path.join(path, frame["file_path"] + extension)
-            # cam_name = frame["file_path"]
             if not os.path.exists(cam_name):
                 print(f"File {cam_name} not found, skipping...")
                 continue
@@ -453,19 +437,16 @@ def readCamerasFromTransformsCity(
                 progress_bar.close()
 
             ct += 1
-            # change from OpenGL/Blender camera axes (Y up, Z back) to COLMAP (Y down, Z forward)
             c2w[:3, 1:3] *= -1
 
-            # get the world-to-camera transform and set R, T
             w2c = np.linalg.inv(c2w)
 
             R = np.transpose(
                 w2c[:3, :3]
-            )  # R is stored transposed due to 'glm' in CUDA code
+            )
             T = w2c[:3, 3]
-            # print(f'path{path}, cam_name{cam_name}')
             image_path = os.path.join(cam_name)
-            image_name = cam_name[-17:]  # Path(cam_name).stem
+            image_name = cam_name[-17:]
             image = Image.open(image_path)
 
             if fovx is not None:
@@ -473,7 +454,6 @@ def readCamerasFromTransformsCity(
                 FovY = fovy
                 FovX = fovx
             else:
-                # given focal in pixel unit
                 FovY = focal2fov(frame["fl_y"], image.size[1])
                 FovX = focal2fov(frame["fl_x"], image.size[0])
 
@@ -493,7 +473,6 @@ def readCamerasFromTransformsCity(
                 )
             )
 
-            # release memory
             image.close()
             image = None
 
@@ -513,14 +492,12 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
         for idx, frame in enumerate(frames):
             cam_name = os.path.join(path, frame["file_path"] + extension)
             c2w = np.array(frame["transform_matrix"])
-            # change from OpenGL/Blender camera axes (Y up, Z back) to COLMAP (Y down, Z forward)
             c2w[:3, 1:3] *= -1
 
-            # get the world-to-camera transform and set R, T
             w2c = np.linalg.inv(c2w)
             R = np.transpose(
                 w2c[:3, :3]
-            )  # R is stored transposed due to 'glm' in CUDA code
+            )
             T = w2c[:3, 3]
 
             image_path = os.path.join(path, cam_name)
@@ -600,9 +577,6 @@ def readNerfSyntheticInfo(path, white_background, eval, extension=".png"):
         ply_path=ply_path,
     )
     return scene_info
-
-
-
 
 
 sceneLoadTypeCallbacks = {
